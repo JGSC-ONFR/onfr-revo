@@ -106,7 +106,7 @@ class FaceGuard:
             gray = cv2.createCLAHE(2.0, (8, 8)).apply(cv2.cvtColor(small, cv2.COLOR_RGB2GRAY))
             if self._cnn is None:
                 self._cnn = dlib.cnn_face_detection_model_v1(self.cnn_path)
-            rects = [d.rect for d in self._cnn(gray, 1) if d.confidence > 0.5]
+            rects = [d.rect for d in self._cnn(gray, 0) if d.confidence > 0.5]  # sin ampliar: 4 s en vez de 25
 
         faces = []
         for r in rects:

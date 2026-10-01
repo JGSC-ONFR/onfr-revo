@@ -118,6 +118,27 @@ def test_guard_rejects_altered_face():
     assert not chk.passed, "el verificador no detectó una cara alterada"
 
 
+def test_painting_restored_without_repainting():
+    """Restaurar cuadro: se acerca al cuadro limpio, conserva los brillos
+    pintados (no son lagunas) y no toca los rasgos de la cara."""
+    from revo.painting import detect_losses
+
+    clean, dirty = load("cuadro_original.png"), load("cuadro_deteriorado.png")
+    res = process(dirty, Settings(mode="restaurar_cuadro", intensity=0.35))
+    lab = lambda x: cv2.cvtColor(x, cv2.COLOR_RGB2LAB).astype(np.float32)  # noqa: E731
+    before = float(np.abs(lab(dirty) - lab(clean)).mean())
+    after = float(np.abs(lab(res.image) - lab(clean)).mean())
+    assert after < 0.8 * before, (before, after)
+    # el brillo blanco del casco (pintado) no se propone como laguna
+    losses, _ = detect_losses(dirty, 0.35)
+    assert not losses[848:922, 689:745].any()
+    # rasgos: iguales a la versión solo limpiada de barniz
+    face = res._faces[0]
+    _, feat = face_masks(dirty.shape, face)
+    d = np.abs(res.image.astype(np.int16) - res._base.astype(np.int16)).max(-1)
+    assert d[feat > 0.5].mean() < 2.0, d[feat > 0.5].mean()
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

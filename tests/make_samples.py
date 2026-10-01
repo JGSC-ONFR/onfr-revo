@@ -57,6 +57,53 @@ def low_quality(rgb):
     return cv2.cvtColor(cv2.imdecode(buf, 1), cv2.COLOR_BGR2RGB)
 
 
+def painting(rgb):
+    """Imitación de óleo: pinceladas (oilPainting) sobre la foto ampliada."""
+    big = cv2.resize(rgb, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    bgr = cv2.xphoto.oilPainting(cv2.cvtColor(big, cv2.COLOR_RGB2BGR), 7, 1)
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def crack_mask(h, w, n=90):
+    """Craquelado: red de grietas finas que se ramifican."""
+    m = np.zeros((h, w), np.uint8)
+    for _ in range(n):
+        x, y = float(rng.uniform(0, w)), float(rng.uniform(0, h))
+        ang = float(rng.uniform(0, 2 * np.pi))
+        for _ in range(int(rng.integers(6, 18))):
+            ang += float(rng.normal(0, 0.5))
+            step = float(rng.uniform(6, 16))
+            nx, ny = x + step * np.cos(ang), y + step * np.sin(ang)
+            cv2.line(m, (int(x), int(y)), (int(nx), int(ny)), 255, int(rng.integers(1, 3)))
+            x, y = nx, ny
+    return m
+
+
+def damaged_painting(rgb):
+    """Barniz amarillento y sucio, craquelado, una zona descolorida y
+    lagunas (pintura caída que deja ver la preparación blanca)."""
+    img = rgb.astype(np.float32)
+    h, w = img.shape[:2]
+    # zona descolorida (pérdida de color, más clara)
+    fade = np.zeros((h, w), np.float32)
+    cv2.ellipse(fade, (int(w * 0.72), int(h * 0.62)), (int(w * 0.12), int(h * 0.09)), 20, 0, 360, 1, -1)
+    fade = cv2.GaussianBlur(fade, (0, 0), 12)[..., None]
+    gray = img.mean(-1, keepdims=True)
+    img = img * (1 - 0.8 * fade) + (gray * 0.85 + 45) * 0.8 * fade
+    # barniz amarillento + suciedad (menos contraste)
+    img = 30 + img * 0.78
+    img *= np.array([1.0, 0.92, 0.72], np.float32)
+    # craquelado
+    cm = crack_mask(h, w) > 0
+    img[cm] *= 0.45
+    # lagunas
+    for _ in range(4):
+        cx, cy = int(rng.uniform(0.1, 0.9) * w), int(rng.uniform(0.1, 0.9) * h)
+        pts = np.array([[cx + rng.integers(-18, 18), cy + rng.integers(-18, 18)] for _ in range(6)], np.int32)
+        cv2.fillPoly(img, [cv2.convexHull(pts)], (236, 230, 214))
+    return np.clip(img, 0, 255).astype(np.uint8), cm
+
+
 def save(name, rgb):
     cv2.imwrite(os.path.join(OUT, name), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
     print("->", name, rgb.shape)
@@ -68,3 +115,10 @@ save("foto_antigua.png", old_photo(astro))
 save("foto_rota.png", torn_photo(astro))
 save("foto_baja_calidad.jpg", low_quality(astro))
 save("cafe_baja_calidad.jpg", low_quality(data.coffee()))
+
+cuadro = painting(astro)
+save("cuadro_original.png", cuadro)
+save("cuadro_deteriorado.png", damaged_painting(cuadro)[0])
+bodegon = painting(data.coffee())
+save("bodegon_original.png", bodegon)
+save("bodegon_deteriorado.png", damaged_painting(bodegon)[0])

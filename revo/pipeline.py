@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from . import colorize as colorizer
-from . import enhance, inpaint, restore
+from . import enhance, inpaint, painting, restore
 from .analysis import Analysis, analyze, estimate_noise
 from .faces import Face, FaceGuard, face_masks
 from .fidelity import FaceCheck, check_face, identity_limit
@@ -19,7 +19,7 @@ MODES = {
     "mejorar_restaurar": "Mejorar + Restaurar",
     "restaurar_cuadro": "Restaurar cuadro",
 }
-PHASE_2 = {"restaurar_cuadro"}
+PHASE_2: set[str] = set()
 
 # intensidades que se prueban sobre una cara hasta pasar la verificación;
 # 0 = cara original, solo escalada
@@ -103,6 +103,9 @@ def process(rgb: np.ndarray, settings: Settings, progress=None) -> Result:
         raise NotImplementedError("«Restaurar cuadro» llegará en la fase 2.")
     if settings.colorize and not colorizer.available():
         raise RuntimeError("Falta el modelo de color. Ejecuta: python setup_models.py")
+
+    if settings.mode == "restaurar_cuadro":
+        return _process_painting(rgb, settings, say, t0)
 
     i = float(np.clip(settings.intensity, 0, 1))
     scale = settings.scale if settings.enhances else 1
@@ -238,6 +241,140 @@ def process(rgb: np.ndarray, settings: Settings, progress=None) -> Result:
     )
 
 
+def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Result:
+    """Restaurar cuadro (ver painting.py): barniz y suciedad, craquelado,
+    lagunas y zonas descoloridas. Sin reducir ruido, enfocar ni ampliar: la
+    pincelada y la textura se quedan como están."""
+    i = float(np.clip(settings.intensity, 0, 1))
+    rgb = np.ascontiguousarray(rgb[..., :3])
+    orig_h, orig_w = rgb.shape[:2]
+    f = min(1.0, MAX_WORK / max(orig_h, orig_w))
+    if f < 1:
+        rgb = cv2.resize(rgb, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+    h, w = rgb.shape[:2]
+
+    say(0.05, "Analizando el cuadro")
+    ana = analyze(rgb)
+    say(0.12, "Buscando rostros")
+    guard = FaceGuard.get()
+    faces = guard.detect(rgb, embed=False)
+    face_u = np.zeros((h, w), np.float32)
+    feat_u = np.zeros((h, w), np.float32)
+    for fc in faces:
+        fm, ft = face_masks(rgb.shape, fc)
+        face_u, feat_u = np.maximum(face_u, fm), np.maximum(feat_u, ft)
+
+    say(0.2, "Quitando barniz amarillento y suciedad")
+    clean, varnish = painting.clean_varnish(rgb, i)
+    work = clean
+
+    say(0.35, "Cerrando grietas")
+    cracks = painting.detect_cracks(work, i, feat_u)
+    if cracks.any():
+        work = cv2.inpaint(work, cracks, 3, cv2.INPAINT_TELEA)
+
+    say(0.5, "Reintegrando lagunas")
+    empty = np.zeros((h, w), np.uint8)
+    losses, user = empty, empty
+    if settings.auto_damage:
+        losses, _ = painting.detect_losses(rgb, i, feat_u)
+    if settings.user_mask is not None and settings.user_mask.any():
+        um = settings.user_mask
+        if um.shape[:2] != (h, w):
+            um = cv2.resize(um.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+        user = (um > 0).astype(np.uint8) * 255
+    holes = ((losses > 0) | (user > 0)).astype(np.uint8)
+    fill_info = {"on_faces": 0, "engine": "FSR"}
+    if holes.any():
+        work, fill_info = inpaint.fill(work, holes, face_u)
+
+    say(0.7, "Recuperando el color perdido")
+    work, faded = painting.revive_faded(work, i, feat_u)
+
+    # rostros: si algo de lo anterior hubiera movido un rasgo, la cara vuelve
+    # a la versión solo limpiada de barniz
+    reports: list[FaceReport] = []
+    ignore = cv2.dilate(((holes > 0) | (cracks > 0)).astype(np.uint8) * 255, np.ones((5, 5), np.uint8))
+    for n, fc in enumerate(faces):
+        say(0.8, f"Verificando rostro {n + 1}")
+        X0, Y0, X1, Y1 = _crop_box(fc, rgb.shape)
+        ref_img = np.ascontiguousarray(clean[Y0:Y1, X0:X1])
+        fl = _shift(fc, X0, Y0)
+        fm_small, _ = face_masks(ref_img.shape, fl)
+        ref = guard.describe(ref_img, Face(fl.rect, fl.landmarks.copy()))
+        id_limit = identity_limit(guard, ref, ref_img, ana.noise)
+        cand = np.ascontiguousarray(work[Y0:Y1, X0:X1])
+        chk = check_face(guard, ref, cand, ref_img, fm_small, ignore[Y0:Y1, X0:X1], id_limit)
+        applied = 1.0
+        # los rasgos nunca se tocan aquí. Las grietas de la referencia
+        # confunden al vector de identidad (cerrarlas ya lo cambia), así que
+        # se exige lo que mide la forma: puntos faciales y estructura
+        same = chk.landmarks <= 0.03 and chk.structure <= 3.0
+        if not same:
+            m = fm_small[..., None]
+            work[Y0:Y1, X0:X1] = np.clip(cand * (1 - m) + ref_img * m, 0, 255).astype(np.uint8)
+            applied = 0.0
+        reports.append(FaceReport(n + 1, fc.rect, applied, chk, 1))
+
+    uncolored = None
+    if settings.colorize:
+        say(0.93, "Estimando colores")
+        uncolored = work
+        work = colorizer.colorize(work, settings.color_amount)
+
+    stats = {
+        "seconds": time.time() - t0,
+        "original_size": (orig_w, orig_h),
+        "cracks": int((cracks > 0).mean() * 10000) / 100,
+        "loss_regions": int(cv2.connectedComponents((losses > 0).astype(np.uint8))[0] - 1),
+        "user_regions": int(cv2.connectedComponents((user > 0).astype(np.uint8))[0] - 1),
+        "faded": faded,
+        "varnish": varnish["removed"],
+        "filled_on_faces": fill_info.get("on_faces", 0),
+        "engine": "IA de relleno (LaMa)" if fill_info.get("engine") == "LaMa" else "la textura de alrededor",
+    }
+    return Result(
+        work, rgb.copy(), ana, settings, reports, stats,
+        _base=clean, _uncolored=uncolored,
+        _masks={"defects": cracks, "damage": losses, "user": user}, _faces=faces,
+    )
+
+
+def _painting_lines(res: Result, changed: float) -> list[str]:
+    s, st = res.settings, res.stats
+    ow, oh = st["original_size"]
+    nh, nw = res.image.shape[:2]
+    da, db = st["varnish"]
+    lines = [
+        "**Restauración del cuadro completada**  ",
+        f"Intervención: {intensity_label(s.intensity)}  ",
+        "Pincelada, textura y composición: sin tocar (no se suaviza, ni se enfoca, ni se amplía)  ",
+        f"Resolución: {ow} × {oh} → {nw} × {nh}",
+        "",
+        "**Zonas tocadas**",
+        f"- Barniz amarillento y suciedad: corrección global (la misma en todo el cuadro), {abs(db):.0f} puntos menos de amarillo",
+        f"- Grietas del craquelado cerradas: {st['cracks']:.2f}% del cuadro",
+    ]
+    if st["loss_regions"] or st["user_regions"]:
+        lines.append(
+            f"- Lagunas reintegradas con {st['engine']}: {st['loss_regions'] + st['user_regions']} "
+            "(lo que había debajo no se puede recuperar; se continúa lo de alrededor)"
+        )
+    if st["faded"] > 0:
+        lines.append(
+            f"- Zonas descoloridas: {100 * st['faded']:.1f}% del cuadro. Se aviva el color que aún conservaban, "
+            "hasta acercarlo al de su entorno; donde se perdió del todo no se inventa (la luz y la pincelada no cambian)"
+        )
+    if s.colorize:
+        lines.append("- Color: estimado por IA. Solo se añade color; la forma y la luz son las del cuadro")
+    for r in res.faces:
+        lines.append(f"- Rostro {r.index}: " + ("verificado, sin cambios en los rasgos" if r.applied else "devuelto a su estado limpio (por seguridad)"))
+    lines.append(f"- Retoques locales apreciables: {100 * changed:.1f}% del cuadro")
+    lines.append("")
+    lines.append(f"_Tiempo: {st['seconds']:.1f} s_")
+    return lines
+
+
 def intervention_map(res: Result) -> tuple[np.ndarray, float]:
     """Mapa visual de qué se ha tocado. Calor = retoques locales (ruido,
     nitidez, contraste local) frente a la versión mínima; magenta = daños
@@ -273,6 +410,8 @@ def summary_lines(res: Result, changed: float | None = None) -> list[str]:
     s, a, st = res.settings, res.analysis, res.stats
     if changed is None:
         changed = intervention_map(res)[1]
+    if s.mode == "restaurar_cuadro":
+        return _painting_lines(res, changed)
     ow, oh = st.get("original_size", (a.width, a.height))
     nh, nw = res.image.shape[:2]
     title = {

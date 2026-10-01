@@ -16,7 +16,7 @@ import numpy as np
 
 from revo import Settings, process
 from revo import colorize as colorizer
-from revo import restore
+from revo import painting, restore
 from revo.analysis import analyze
 from revo.faces import FaceGuard, face_masks
 from revo.inpaint import lama_available, preload
@@ -26,13 +26,26 @@ MODE_BUTTONS = [
     ("mejorar", "Mejorar"),
     ("restaurar", "Restaurar"),
     ("mejorar_restaurar", "Mejorar + Restaurar"),
+    ("restaurar_cuadro", "Restaurar cuadro"),
 ]
-ACTION = {"mejorar": "MEJORAR", "restaurar": "RESTAURAR", "mejorar_restaurar": "MEJORAR + RESTAURAR"}
-SLIDER_LABEL = {"mejorar": "Mejora", "restaurar": "Restauración", "mejorar_restaurar": "Intervención"}
+ACTION = {
+    "mejorar": "MEJORAR",
+    "restaurar": "RESTAURAR",
+    "mejorar_restaurar": "MEJORAR + RESTAURAR",
+    "restaurar_cuadro": "RESTAURAR CUADRO",
+}
+SLIDER_LABEL = {
+    "mejorar": "Mejora",
+    "restaurar": "Restauración",
+    "mejorar_restaurar": "Intervención",
+    "restaurar_cuadro": "Restauración",
+}
 MODE_HELP = {
     "mejorar": "Fotos actuales o de baja calidad: resolución, ruido, artefactos, nitidez y luz moderada.",
     "restaurar": "Fotos antiguas o deterioradas: polvo, manchas, arañazos, roturas, ruido y contraste. Mantiene la época y la resolución.",
     "mejorar_restaurar": "Proceso completo: restauración → recuperación de calidad → aumento de resolución.",
+    "restaurar_cuadro": "Pinturas: barniz amarillento, suciedad, grietas, lagunas y zonas descoloridas. "
+    "Conserva pincelada, textura, colores y composición: no parece recién pintado.",
 }
 PREVIEW_SIDE = 1600  # px de la vista previa ANTES/DESPUÉS
 # niveles en lugar de números (como el selector de esfuerzo)
@@ -68,7 +81,7 @@ button.mode-btn.primary {filter:none; opacity:1; transform:translateY(-2px) scal
 button.mode-btn:nth-child(1) {background:linear-gradient(135deg,#06b6d4,#3b82f6) !important}
 button.mode-btn:nth-child(2) {background:linear-gradient(135deg,#f59e0b,#f97316) !important}
 button.mode-btn:nth-child(3) {background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%) !important}
-button.mode-btn:nth-child(4) {background:linear-gradient(135deg,#a3a3a3,#d4d4d4) !important; color:#fff !important}
+button.mode-btn:nth-child(4) {background:linear-gradient(135deg,#10b981,#84cc16) !important}
 
 /* paneles con brillo de color */
 .gradio-container .block {border-radius:18px !important}
@@ -149,7 +162,7 @@ def mode_updates(mode):
         gr.update(label=SLIDER_LABEL[mode]),
         gr.update(value=ACTION[mode]),
         f"_{MODE_HELP[mode]}_",
-        gr.update(visible=mode != "restaurar"),
+        gr.update(visible=mode not in ("restaurar", "restaurar_cuadro")),
     )
 
 
@@ -213,6 +226,38 @@ def _painted(ed, shape):
     return mask
 
 
+def _suggestions(img, mode, intensity, monochrome):
+    """Capa del pincel con los daños grandes sugeridos (en rosa)."""
+    layer = np.zeros((*img.shape[:2], 4), np.uint8)
+    if not (monochrome or mode == "restaurar_cuadro"):
+        return layer
+    faces = FaceGuard.get().detect(img, embed=False)
+    fu = np.zeros(img.shape[:2], np.float32)
+    ft = np.zeros(img.shape[:2], np.float32)
+    for f in faces:
+        m1, m2 = face_masks(img.shape, f)
+        fu, ft = np.maximum(fu, m1), np.maximum(ft, m2)
+    if mode == "restaurar_cuadro":  # lagunas: pintura caída
+        dmg, regions = painting.detect_losses(img, LEVELS[intensity], ft)
+    else:
+        dmg, info = restore.detect_damage(img, True, fu, ft, LEVELS[intensity])
+        regions = info["regions"]
+    if regions:
+        layer[dmg > 0] = MARK_RGBA
+    return layer
+
+
+def resuggest(original, mode, intensity):
+    """Al pasar a «Restaurar cuadro» con una foto ya subida, se proponen las
+    lagunas en lugar de las roturas de foto."""
+    if original is None:
+        return gr.update()
+    from revo.analysis import is_monochrome
+
+    layer = _suggestions(original, mode, intensity, is_monochrome(original))
+    return {"background": original, "layers": [layer], "composite": None}
+
+
 def on_upload(ed, mode, user_picked, intensity):
     img = _background(ed)
     if img is None:
@@ -227,17 +272,7 @@ def on_upload(ed, mode, user_picked, intensity):
 
     # daños grandes sugeridos: se pintan en la capa del pincel para que puedas
     # revisarlos (borrar o añadir) antes de reparar
-    layer = np.zeros((*img.shape[:2], 4), np.uint8)
-    if a.monochrome:
-        faces = FaceGuard.get().detect(img, embed=False)
-        fu = np.zeros(img.shape[:2], np.float32)
-        ft = np.zeros(img.shape[:2], np.float32)
-        for f in faces:
-            m1, m2 = face_masks(img.shape, f)
-            fu, ft = np.maximum(fu, m1), np.maximum(ft, m2)
-        dmg, info = restore.detect_damage(img, True, fu, ft, LEVELS[intensity])
-        if info["regions"]:
-            layer[dmg > 0] = MARK_RGBA
+    layer = _suggestions(img, mode, intensity, a.monochrome)
     new_value = {"background": img, "layers": [layer], "composite": None}
     return new_value, img, gr.update(visible=a.monochrome), mode, *mode_updates(mode)[1:]
 
@@ -344,7 +379,6 @@ with gr.Blocks(title="ONFR REVO") as demo:
             gr.Button(label, variant="primary" if m == "mejorar_restaurar" else "secondary", elem_classes="mode-btn")
             for m, label in MODE_BUTTONS
         ]
-        gr.Button("Restaurar cuadro\n(próximamente)", interactive=False, elem_classes="mode-btn")
     mode_help = gr.Markdown(f"_{MODE_HELP['mejorar_restaurar']}_")
 
     with gr.Row():
@@ -401,7 +435,9 @@ with gr.Blocks(title="ONFR REVO") as demo:
 
     mode_outputs = [mode, *buttons, intensity, go, mode_help, scale_box]
     for (m, _), b in zip(MODE_BUTTONS, buttons):
-        b.click(lambda m=m: mode_updates(m), None, mode_outputs).then(lambda: True, None, user_picked)
+        ev = b.click(lambda m=m: mode_updates(m), None, mode_outputs).then(lambda: True, None, user_picked)
+        if m == "restaurar_cuadro":
+            ev.then(resuggest, [original, mode, intensity], editor)
 
     # el botón espera a que termine el análisis (y las marcas rosas)
     editor.upload(lambda: gr.update(interactive=False, value="Analizando la imagen…"), None, go).then(
