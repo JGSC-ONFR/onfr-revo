@@ -36,13 +36,16 @@ def clean_varnish(rgb: np.ndarray, intensity: float) -> tuple[np.ndarray, dict]:
     lab = _lab(rgb).astype(np.float32)
     L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
     lights = L >= np.percentile(L, 97)
-    cast_a = float(np.median(a[lights]) - 128)
-    cast_b = float(np.median(b[lights]) - 128)
+    # los blancos menos amarillos del cuadro: en un cuadro cálido a propósito
+    # siempre queda alguno neutro (y entonces apenas se corrige); bajo un
+    # barniz amarillento hasta los más fríos amarillean
+    cast_a = float(np.percentile(a[lights], 50) - 128)
+    cast_b = float(np.percentile(b[lights], 10) - 128)
     k = 0.35 + 0.25 * intensity  # fracción del tono amarillento que se quita
     da = -np.clip(cast_a, -12, 12) * k
-    db = -np.clip(cast_b, -25, 25) * k
-    # el velo pesa más en las luces que en las sombras
-    wl = np.clip(L / 255.0, 0.25, 1.0)
+    db = -np.clip(cast_b, 0, 25) * k
+    # el velo amarillo se nota sobre todo en las luces
+    wl = np.clip(L / 255.0, 0.0, 1.0) ** 2
     a2 = a + da * wl
     b2 = b + db * wl
     # suciedad: niveles (negro y blanco) con un recorte muy suave
