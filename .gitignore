@@ -1,0 +1,5 @@
+models/*.dat
+__pycache__/
+*.pyc
+.venv/
+*_revo.png
