@@ -24,6 +24,8 @@ PHASE_2 = {"restaurar_cuadro"}
 # intensidades que se prueban sobre una cara hasta pasar la verificación;
 # 0 = cara original, solo escalada
 FACE_STEPS = (0.7, 0.5, 0.35, 0.2, 0.1, 0.0)
+MAX_WORK = 2000  # px del lado largo con que se trabaja
+MAX_OUT = 4000  # px del lado largo del resultado
 
 
 @dataclass
@@ -105,7 +107,14 @@ def process(rgb: np.ndarray, settings: Settings, progress=None) -> Result:
     i = float(np.clip(settings.intensity, 0, 1))
     scale = settings.scale if settings.enhances else 1
     rgb = np.ascontiguousarray(rgb[..., :3])
+    orig_h, orig_w = rgb.shape[:2]
+    # tamaño de trabajo acotado: una foto de móvil (4000 px) tardaría más de
+    # un minuto y no aporta detalle real; el resultado tampoco pasa de MAX_OUT
+    f = min(1.0, MAX_WORK / max(orig_h, orig_w))
+    if f < 1:
+        rgb = cv2.resize(rgb, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
     h, w = rgb.shape[:2]
+    scale = max(1, min(scale, MAX_OUT // max(h, w)))
 
     say(0.05, "Analizando imagen")
     ana = analyze(rgb)
@@ -210,6 +219,7 @@ def process(rgb: np.ndarray, settings: Settings, progress=None) -> Result:
 
     stats = {
         "seconds": time.time() - t0,
+        "original_size": (orig_w, orig_h),
         "defect_regions": int(cv2.connectedComponents((defects > 0).astype(np.uint8))[0] - 1),
         "damage_regions": int(cv2.connectedComponents((damage > 0).astype(np.uint8))[0] - 1),
         "user_regions": int(cv2.connectedComponents((user > 0).astype(np.uint8))[0] - 1),
@@ -263,7 +273,7 @@ def summary_lines(res: Result, changed: float | None = None) -> list[str]:
     s, a, st = res.settings, res.analysis, res.stats
     if changed is None:
         changed = intervention_map(res)[1]
-    oh, ow = a.height, a.width
+    ow, oh = st.get("original_size", (a.width, a.height))
     nh, nw = res.image.shape[:2]
     title = {
         "mejorar": "Mejora completada",

@@ -19,7 +19,7 @@ from revo import restore
 from revo.analysis import analyze
 from revo.faces import FaceGuard, face_masks
 from revo.inpaint import lama_available, preload
-from revo.pipeline import intervention_map, summary_lines
+from revo.pipeline import MAX_WORK, intervention_map, summary_lines
 
 MODE_BUTTONS = [
     ("mejorar", "Mejorar"),
@@ -37,12 +37,30 @@ BRUSH = "#ff2bd6"
 MARK_RGBA = (255, 43, 214, 150)
 
 CSS = """
+.gradio-container {background:
+  radial-gradient(1200px 600px at 0% -10%, rgba(124,58,237,.22), transparent 60%),
+  radial-gradient(900px 500px at 100% 0%, rgba(6,182,212,.20), transparent 60%),
+  radial-gradient(900px 600px at 50% 110%, rgba(219,39,119,.16), transparent 60%) !important}
 #revo-title {text-align:center; margin-top:8px}
-#revo-title h1 {font-size:2.6rem; letter-spacing:.35rem; margin-bottom:0}
-#revo-title p {margin:2px 0; opacity:.75}
-.mode-btn button, button.mode-btn {min-height:84px !important; font-size:1.15rem !important}
-#go-btn {min-height:56px; font-size:1.2rem; letter-spacing:.1rem}
-#lock {opacity:.85}
+#revo-title h1 {font-size:3rem; letter-spacing:.4rem; margin-bottom:0; font-weight:800;
+  background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%); -webkit-background-clip:text; background-clip:text; color:transparent;
+  background-size:200% auto; animation: revo-shine 6s linear infinite}
+#revo-title p {margin:2px 0; opacity:.8}
+@keyframes revo-shine {to {background-position:200% center}}
+.mode-btn button, button.mode-btn {min-height:84px !important; font-size:1.15rem !important;
+  border-radius:16px !important; font-weight:700 !important; transition:transform .15s, box-shadow .15s}
+button.mode-btn:hover {transform:translateY(-2px)}
+button.mode-btn.primary {background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%) !important; color:#fff !important; border:none !important;
+  box-shadow:0 8px 24px rgba(219,39,119,.35)}
+button.mode-btn.secondary {border:2px solid rgba(124,58,237,.35) !important}
+#go-btn {min-height:60px; font-size:1.25rem; letter-spacing:.12rem; font-weight:800; border:none !important;
+  color:#fff !important; border-radius:16px !important; background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%) !important;
+  background-size:200% auto !important; box-shadow:0 10px 28px rgba(124,58,237,.4);
+  animation: revo-shine 5s linear infinite}
+#lock {border-left:4px solid #10b981; padding-left:10px; border-radius:6px; background:rgba(16,185,129,.08)}
+#save-btn {background:linear-gradient(110deg,#10b981,#06b6d4) !important; color:#fff !important; border:none !important}
+#summary-btn {border:2px solid rgba(6,182,212,.6) !important}
+.block, .form {border-radius:16px !important}
 
 /* ---- animación de procesado (destellos, estilo borrador IA) ---- */
 .revo-anim {position:relative; overflow:hidden; border-radius:14px; background:#111;
@@ -118,8 +136,14 @@ def on_upload(ed, mode, user_picked, intensity):
     img = _background(ed)
     if img is None:
         return gr.update(), "", gr.update(visible=False), mode, *mode_updates(mode)[1:]
+    big = max(img.shape[:2]) > MAX_WORK
+    if big:  # fotos de móvil enormes: se trabaja a MAX_WORK px (mucho más rápido)
+        f = MAX_WORK / max(img.shape[:2])
+        img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
     a = analyze(img)
     text = "**REVO ha analizado la imagen**\n\n" + "\n".join(f"- {d}" for d in a.describe())
+    if big:
+        text += f"\n- Foto muy grande: se trabaja a {img.shape[1]} × {img.shape[0]} px para ir rápido"
     if not user_picked:
         mode = a.suggested_mode()
         text += f"\n\nModo sugerido: **{dict(MODE_BUTTONS)[mode]}**"
@@ -182,7 +206,22 @@ def run(ed, mode, intensity, scale, color_on, color_amount):
         user_mask=_painted(ed, img.shape),
         auto_damage=False,  # los daños grandes ya están en la capa del pincel
     )
-    res = process(img, s)
+    try:
+        res = process(img, s)
+    except Exception as e:  # noqa: BLE001  la animación no debe quedarse girando
+        import traceback
+
+        traceback.print_exc()
+        return (
+            None,
+            gr.update(visible=True),
+            gr.update(value="", visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(value=f"**No se ha podido procesar la imagen:** {e}", visible=True),
+            gr.update(value="", visible=False),
+            gr.update(value=None, visible=False),
+        )
     out_path = os.path.join(tempfile.mkdtemp(prefix="revo_"), "revo_resultado.png")
     cv2.imwrite(out_path, cv2.cvtColor(res.image, cv2.COLOR_RGB2BGR))
     t = res.stats["seconds"]
@@ -264,8 +303,8 @@ with gr.Blocks(title="ONFR REVO") as demo:
             slider = gr.ImageSlider(label="ANTES ⟷ DESPUÉS", type="numpy", format="png", max_height=560)
             done_md = gr.Markdown(visible=False)
             with gr.Row():
-                save = gr.DownloadButton("Guardar", visible=False, variant="primary")
-                summary_btn = gr.Button("Ver resumen", visible=False)
+                save = gr.DownloadButton("Guardar", visible=False, variant="primary", elem_id="save-btn")
+                summary_btn = gr.Button("Ver resumen", visible=False, elem_id="summary-btn")
             summary = gr.Markdown(visible=False)
             imap = gr.Image(label="Mapa de intervención", type="numpy", interactive=False, visible=False)
             gr.Markdown(
@@ -293,7 +332,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
 
 if __name__ == "__main__":
     demo.queue().launch(
-        theme=gr.themes.Soft(primary_hue="neutral"),
+        theme=gr.themes.Soft(primary_hue="violet", secondary_hue="pink", neutral_hue="slate"),
         css=CSS,
         server_name=os.environ.get("REVO_HOST", "127.0.0.1"),
         server_port=int(os.environ.get("REVO_PORT", "7860")),
