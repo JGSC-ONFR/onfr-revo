@@ -35,6 +35,9 @@ MODE_HELP = {
     "mejorar_restaurar": "Proceso completo: restauración → recuperación de calidad → aumento de resolución.",
 }
 PREVIEW_SIDE = 1600  # px de la vista previa ANTES/DESPUÉS
+# niveles en lugar de números (como el selector de esfuerzo)
+LEVELS = {"Bajo": 0.15, "Medio": 0.35, "Alto": 0.55, "Ultra": 0.75, "Max": 1.0}
+COLOR_LEVELS = {"Bajo": 0.4, "Medio": 0.6, "Alto": 0.8, "Ultra": 1.0, "Max": 1.2}
 BRUSH = "#ff2bd6"
 MARK_RGBA = (255, 43, 214, 150)
 
@@ -75,6 +78,18 @@ button.mode-btn:nth-child(4) {background:linear-gradient(135deg,#a3a3a3,#d4d4d4)
 .gradio-container [data-testid="block-label"] svg {color:#fff !important}
 .gradio-container [data-testid="block-info"] {color:#7c3aed !important; font-weight:700}
 .gradio-container input[type=range] {accent-color:#db2777}
+
+/* niveles Bajo · Medio · Alto · Ultra · Max: barra segmentada */
+.levels .wrap {display:flex !important; flex-wrap:nowrap !important; gap:0 !important; padding:4px !important;
+  border-radius:999px !important; background:rgba(124,58,237,.10) !important}
+.levels label {flex:1 1 0 !important; justify-content:center !important; margin:0 !important; border:none !important;
+  border-radius:999px !important; background:transparent !important; box-shadow:none !important;
+  font-weight:700 !important; color:#6d28d9 !important; padding:8px 0 !important; transition:background .2s, color .2s}
+.levels label input {display:none !important}
+.levels label:hover {background:rgba(219,39,119,.12) !important}
+.levels label.selected, .levels label:has(input:checked) {color:#fff !important;
+  background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%) !important;
+  box-shadow:0 4px 14px rgba(219,39,119,.35) !important}
 
 #go-btn {min-height:64px; font-size:1.3rem; letter-spacing:.14rem; font-weight:900; border:none !important;
   color:#fff !important; border-radius:18px !important;
@@ -129,7 +144,7 @@ def mode_updates(mode):
     return (
         mode,
         *btns,
-        gr.update(label=f"{SLIDER_LABEL[mode]}  ·  Conservadora ⟷ Intensa"),
+        gr.update(label=SLIDER_LABEL[mode]),
         gr.update(value=ACTION[mode]),
         f"_{MODE_HELP[mode]}_",
         gr.update(visible=mode != "restaurar"),
@@ -199,18 +214,14 @@ def _painted(ed, shape):
 def on_upload(ed, mode, user_picked, intensity):
     img = _background(ed)
     if img is None:
-        return gr.update(), None, "", gr.update(visible=False), mode, *mode_updates(mode)[1:]
+        return gr.update(), None, gr.update(visible=False), mode, *mode_updates(mode)[1:]
     big = max(img.shape[:2]) > MAX_WORK
     if big:  # fotos de móvil enormes: se trabaja a MAX_WORK px (mucho más rápido)
         f = MAX_WORK / max(img.shape[:2])
         img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
     a = analyze(img)
-    text = "**REVO ha analizado la imagen**\n\n" + "\n".join(f"- {d}" for d in a.describe())
-    if big:
-        text += f"\n- Foto muy grande: se trabaja a {img.shape[1]} × {img.shape[0]} px para ir rápido"
     if not user_picked:
         mode = a.suggested_mode()
-        text += f"\n\nModo sugerido: **{dict(MODE_BUTTONS)[mode]}**"
 
     # daños grandes sugeridos: se pintan en la capa del pincel para que puedas
     # revisarlos (borrar o añadir) antes de reparar
@@ -222,17 +233,11 @@ def on_upload(ed, mode, user_picked, intensity):
         for f in faces:
             m1, m2 = face_masks(img.shape, f)
             fu, ft = np.maximum(fu, m1), np.maximum(ft, m2)
-        dmg, info = restore.detect_damage(img, True, fu, ft, intensity / 100)
+        dmg, info = restore.detect_damage(img, True, fu, ft, LEVELS[intensity])
         if info["regions"]:
             layer[dmg > 0] = MARK_RGBA
-            text += (
-                f"\n\nHe marcado en rosa **{info['regions']} daños** (roturas, marcas). "
-                "Revísalos con el pincel o la goma antes de reparar."
-            )
-    if not a.monochrome or not layer[..., 3].any():
-        text += "\n\nSi ves agujeros o rasguños, píntalos con el pincel y REVO los rellenará."
     new_value = {"background": img, "layers": [layer], "composite": None}
-    return new_value, img, text, gr.update(visible=a.monochrome), mode, *mode_updates(mode)[1:]
+    return new_value, img, gr.update(visible=a.monochrome), mode, *mode_updates(mode)[1:]
 
 
 def anim_html(original):
@@ -263,10 +268,10 @@ def run(ed, original, mode, intensity, scale, color_on, color_amount):
         raise gr.Error("Primero sube una imagen.")
     s = Settings(
         mode=mode,
-        intensity=intensity / 100.0,
+        intensity=LEVELS[intensity],
         scale=int(scale.rstrip("×")),
         colorize=bool(color_on),
-        color_amount=color_amount / 100.0,
+        color_amount=COLOR_LEVELS[color_amount],
         user_mask=_painted(ed, img.shape),
         auto_damage=False,  # los daños grandes ya están en la capa del pincel
     )
@@ -353,8 +358,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
                 height=520,
             )
             editor.preprocess = _retrying(editor.preprocess)
-            analysis_md = gr.Markdown()
-            intensity = gr.Slider(0, 100, value=35, step=1, label="Intervención  ·  Conservadora ⟷ Intensa")
+            intensity = gr.Radio(list(LEVELS), value="Medio", label="Intervención", elem_classes="levels")
             with gr.Group(visible=False) as color_box:
                 color_on = gr.Checkbox(
                     label=(
@@ -365,7 +369,9 @@ with gr.Blocks(title="ONFR REVO") as demo:
                     value=False,
                     interactive=COLOR_OK,
                 )
-                color_amount = gr.Slider(0, 100, value=80, step=1, label="Intensidad del color", visible=False)
+                color_amount = gr.Radio(
+                    list(COLOR_LEVELS), value="Alto", label="Intensidad del color", visible=False, elem_classes="levels"
+                )
             gr.Markdown(
                 "**Protección facial  ● ON** — siempre activa. REVO no inventa rasgos: si no puede "
                 "mejorar una cara con seguridad, la deja como estaba.",
@@ -397,7 +403,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
 
     # el botón espera a que termine el análisis (y las marcas rosas)
     editor.upload(lambda: gr.update(interactive=False, value="Analizando la imagen…"), None, go).then(
-        on_upload, [editor, mode, user_picked, intensity], [editor, original, analysis_md, color_box, *mode_outputs]
+        on_upload, [editor, mode, user_picked, intensity], [editor, original, color_box, *mode_outputs]
     ).then(lambda m: gr.update(interactive=True, value=ACTION[m]), mode, go)
     color_on.change(lambda on: gr.update(visible=bool(on)), color_on, color_amount)
     start = go.click(anim_html, original, [anim, slider], show_progress="hidden")
