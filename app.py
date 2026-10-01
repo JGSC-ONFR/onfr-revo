@@ -321,9 +321,10 @@ with gr.Blocks(title="ONFR REVO") as demo:
     for (m, _), b in zip(MODE_BUTTONS, buttons):
         b.click(lambda m=m: mode_updates(m), None, mode_outputs).then(lambda: True, None, user_picked)
 
-    editor.upload(
+    # el botón espera a que termine el análisis (y las marcas rosas)
+    editor.upload(lambda: gr.update(interactive=False, value="Analizando la imagen…"), None, go).then(
         on_upload, [editor, mode, user_picked, intensity], [editor, analysis_md, color_box, *mode_outputs]
-    )
+    ).then(lambda m: gr.update(interactive=True, value=ACTION[m]), mode, go)
     color_on.change(lambda on: gr.update(visible=bool(on)), color_on, color_amount)
     go.click(anim_html, editor, [anim, slider], show_progress="hidden").then(
         run,
