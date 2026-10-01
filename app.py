@@ -37,30 +37,55 @@ BRUSH = "#ff2bd6"
 MARK_RGBA = (255, 43, 214, 150)
 
 CSS = """
-.gradio-container {background:
-  radial-gradient(1200px 600px at 0% -10%, rgba(124,58,237,.22), transparent 60%),
-  radial-gradient(900px 500px at 100% 0%, rgba(6,182,212,.20), transparent 60%),
-  radial-gradient(900px 600px at 50% 110%, rgba(219,39,119,.16), transparent 60%) !important}
+.gradio-container, body {background:
+  radial-gradient(900px 520px at 0% 0%, rgba(124,58,237,.38), transparent 62%),
+  radial-gradient(800px 480px at 100% 0%, rgba(6,182,212,.36), transparent 62%),
+  radial-gradient(900px 600px at 100% 100%, rgba(249,115,22,.26), transparent 62%),
+  radial-gradient(900px 600px at 0% 100%, rgba(219,39,119,.30), transparent 62%),
+  #fbf7ff !important}
 #revo-title {text-align:center; margin-top:8px}
-#revo-title h1 {font-size:3rem; letter-spacing:.4rem; margin-bottom:0; font-weight:800;
-  background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%); -webkit-background-clip:text; background-clip:text; color:transparent;
-  background-size:200% auto; animation: revo-shine 6s linear infinite}
-#revo-title p {margin:2px 0; opacity:.8}
-@keyframes revo-shine {to {background-position:200% center}}
-.mode-btn button, button.mode-btn {min-height:84px !important; font-size:1.15rem !important;
-  border-radius:16px !important; font-weight:700 !important; transition:transform .15s, box-shadow .15s}
-button.mode-btn:hover {transform:translateY(-2px)}
-button.mode-btn.primary {background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%) !important; color:#fff !important; border:none !important;
-  box-shadow:0 8px 24px rgba(219,39,119,.35)}
-button.mode-btn.secondary {border:2px solid rgba(124,58,237,.35) !important}
-#go-btn {min-height:60px; font-size:1.25rem; letter-spacing:.12rem; font-weight:800; border:none !important;
-  color:#fff !important; border-radius:16px !important; background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%) !important;
-  background-size:200% auto !important; box-shadow:0 10px 28px rgba(124,58,237,.4);
-  animation: revo-shine 5s linear infinite}
-#lock {border-left:4px solid #10b981; padding-left:10px; border-radius:6px; background:rgba(16,185,129,.08)}
-#save-btn {background:linear-gradient(110deg,#10b981,#06b6d4) !important; color:#fff !important; border:none !important}
-#summary-btn {border:2px solid rgba(6,182,212,.6) !important}
-.block, .form {border-radius:16px !important}
+#revo-title h1 {font-size:3.4rem; letter-spacing:.45rem; margin-bottom:4px; font-weight:900;
+  background:linear-gradient(110deg, #7c3aed, #db2777, #f97316, #eab308, #10b981, #06b6d4, #7c3aed);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  background-size:300% auto; animation: revo-shine 8s linear infinite;
+  filter: drop-shadow(0 4px 14px rgba(219,39,119,.25))}
+#revo-title p {margin:2px 0; font-weight:600; color:#6d28d9}
+#revo-title em {color:#db2777}
+@keyframes revo-shine {to {background-position:300% center}}
+
+/* modos: cada uno con su color */
+.mode-btn button, button.mode-btn {min-height:88px !important; font-size:1.2rem !important; color:#fff !important;
+  border-radius:18px !important; font-weight:800 !important; border:none !important;
+  transition:transform .15s, box-shadow .15s, filter .15s; filter:saturate(.75) brightness(1.05); opacity:.82}
+button.mode-btn:hover {transform:translateY(-3px); opacity:1}
+button.mode-btn.primary {filter:none; opacity:1; transform:translateY(-2px) scale(1.02);
+  box-shadow:0 10px 28px rgba(219,39,119,.45), 0 0 0 3px #fff, 0 0 0 6px rgba(124,58,237,.55) !important}
+button.mode-btn:nth-child(1) {background:linear-gradient(135deg,#06b6d4,#3b82f6) !important}
+button.mode-btn:nth-child(2) {background:linear-gradient(135deg,#f59e0b,#f97316) !important}
+button.mode-btn:nth-child(3) {background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%) !important}
+button.mode-btn:nth-child(4) {background:linear-gradient(135deg,#a3a3a3,#d4d4d4) !important; color:#fff !important}
+
+/* paneles con brillo de color */
+.gradio-container .block {border-radius:18px !important}
+.gradio-container .gr-group, .gradio-container .form {border-radius:18px !important}
+.gradio-container [data-testid="block-label"] {background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%) !important; color:#fff !important;
+  border:none !important; font-weight:700}
+.gradio-container [data-testid="block-label"] svg {color:#fff !important}
+.gradio-container [data-testid="block-info"] {color:#7c3aed !important; font-weight:700}
+.gradio-container input[type=range] {accent-color:#db2777}
+
+#go-btn {min-height:64px; font-size:1.3rem; letter-spacing:.14rem; font-weight:900; border:none !important;
+  color:#fff !important; border-radius:18px !important;
+  background:linear-gradient(110deg, #7c3aed, #db2777, #f97316, #db2777, #7c3aed) !important;
+  background-size:300% auto !important; box-shadow:0 12px 30px rgba(219,39,119,.45);
+  animation: revo-shine 6s linear infinite}
+#go-btn:disabled {filter:grayscale(.5); opacity:.7}
+#lock {border-left:5px solid #10b981; padding:6px 12px; border-radius:10px;
+  background:linear-gradient(90deg, rgba(16,185,129,.18), rgba(6,182,212,.08))}
+#save-btn {background:linear-gradient(110deg,#10b981,#06b6d4) !important; color:#fff !important; border:none !important;
+  font-weight:800 !important; box-shadow:0 8px 22px rgba(16,185,129,.4)}
+#summary-btn {background:linear-gradient(110deg,#f59e0b,#ec4899) !important; color:#fff !important; border:none !important;
+  font-weight:800 !important; box-shadow:0 8px 22px rgba(236,72,153,.35)}
 
 /* ---- animación de procesado (destellos, estilo borrador IA) ---- */
 .revo-anim {position:relative; overflow:hidden; border-radius:14px; background:#111;
