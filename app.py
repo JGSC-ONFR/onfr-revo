@@ -130,13 +130,15 @@ button.mode-btn:nth-child(4) {background:linear-gradient(135deg,#a3a3a3,#d4d4d4)
 @keyframes revo-breathe {0%,100% {filter:saturate(.85) brightness(.92)} 50% {filter:saturate(1) brightness(1.02)}}
 """
 
-# carga los modelos de caras al arrancar, no en la primera foto
-FaceGuard.get()
-preload()  # LaMa se carga mientras eliges la foto
-if colorizer.available():  # y el modelo de color también
-    import threading
 
-    threading.Thread(target=colorizer._load, daemon=True).start()
+
+def warm_up():
+    """Modelos cargados mientras eliges la foto, no en la primera foto.
+    Se llama después de abrir la web, para que REVO abra cuanto antes."""
+    preload()  # LaMa, en su propio proceso: no bloquea la interfaz
+    FaceGuard.get()
+    if colorizer.available():
+        colorizer._load()
 
 
 def mode_updates(mode):
@@ -427,4 +429,7 @@ if __name__ == "__main__":
         server_name=os.environ.get("REVO_HOST", "127.0.0.1"),
         server_port=int(os.environ.get("REVO_PORT", "7860")),
         inbrowser=os.environ.get("REVO_OPEN_BROWSER") == "1",
+        prevent_thread_lock=True,
     )
+    warm_up()
+    demo.block_thread()

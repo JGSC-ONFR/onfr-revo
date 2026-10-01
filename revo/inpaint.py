@@ -11,7 +11,11 @@
 """
 from __future__ import annotations
 
+import atexit
 import os
+import pickle
+import subprocess
+import sys
 import threading
 
 import cv2
@@ -38,43 +42,45 @@ def lama_available(models_dir: str = MODELS_DIR) -> bool:
     return True
 
 
-def _lama_session():
+def _start_worker():
+    """Lanza (una vez) el proceso que carga y ejecuta LaMa."""
     global _lama
-    with _lama_lock:  # si la precarga está en marcha, se espera a ella
-        if _lama is None:
-            import onnxruntime as ort
-
-            _lama = ort.InferenceSession(os.path.join(MODELS_DIR, LAMA), providers=["CPUExecutionProvider"])
+    if _lama is None or _lama.poll() is not None:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # sin ventana extra en Windows
+        _lama = subprocess.Popen(
+            # se ejecuta por ruta, no con -m: así no importa el paquete revo (dlib…)
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lama_worker.py"),
+             os.path.join(MODELS_DIR, LAMA)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            creationflags=flags,
+        )
+        _lama.ready = False
+        atexit.register(_lama.kill)
     return _lama
 
 
 def preload() -> None:
-    """Carga LaMa en segundo plano (≈13 s en un portátil) para que la
-    primera foto no tenga que esperarla."""
+    """Empieza a cargar LaMa en su propio proceso (≈13-30 s en un portátil)
+    sin bloquear la interfaz: cuando llegue la primera foto ya estará lista."""
     if lama_available():
-        threading.Thread(target=_lama_session, daemon=True).start()
+        with _lama_lock:
+            _start_worker()
 
 
 def _lama_fill(crop: np.ndarray, hole: np.ndarray) -> np.ndarray:
-    """LaMa trabaja a 512x512: imagen en [0,1] (1,3,512,512) y máscara
-    (1,1,512,512) con 1 = hueco."""
-    sess = _lama_session()
-    h, w = crop.shape[:2]
-    img = cv2.resize(crop, (512, 512), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
-    m = (cv2.resize(hole.astype(np.uint8), (512, 512), interpolation=cv2.INTER_NEAREST) > 0).astype(np.float32)
-    m = cv2.dilate(m, np.ones((3, 3), np.uint8))
-    inputs = sess.get_inputs()
-    feed = {}
-    for inp in inputs:
-        if "mask" in inp.name.lower() or (inp.shape and inp.shape[1] == 1):
-            feed[inp.name] = m[None, None]
-        else:
-            feed[inp.name] = img.transpose(2, 0, 1)[None]
-    out = sess.run(None, feed)[0][0].transpose(1, 2, 0)
-    if out.max() <= 1.5:
-        out = out * 255.0
-    out = np.clip(out, 0, 255).astype(np.uint8)
-    return cv2.resize(out, (w, h), interpolation=cv2.INTER_CUBIC)
+    with _lama_lock:
+        p = _start_worker()
+        if not p.ready:
+            if pickle.load(p.stdout) != "ready":
+                raise RuntimeError("LaMa no ha arrancado")
+            p.ready = True
+        pickle.dump((np.ascontiguousarray(crop), hole.astype(np.uint8)), p.stdin)
+        p.stdin.flush()
+        res = pickle.load(p.stdout)
+    if isinstance(res, Exception):
+        raise res
+    return res
 
 
 def _fsr(crop: np.ndarray, hole: np.ndarray) -> np.ndarray:
@@ -165,7 +171,10 @@ def fill(rgb: np.ndarray, mask: np.ndarray, face_mask: np.ndarray | None = None)
             if not sel.any():
                 continue
             hole = (sel | face_hole[y0:y1, x0:x1] | big_rest[y0:y1, x0:x1] | mid_rest[y0:y1, x0:x1]).astype(np.uint8)
-            rec = fn(out[y0:y1, x0:x1], hole)
+            try:
+                rec = fn(out[y0:y1, x0:x1], hole)
+            except Exception:  # noqa: BLE001  si LaMa falla, relleno clásico
+                rec = _fsr(out[y0:y1, x0:x1], hole)
             out[y0:y1, x0:x1][sel] = rec[sel]
             info["passes"] += 1
 
