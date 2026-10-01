@@ -104,6 +104,8 @@ button.mode-btn:nth-child(4) {background:linear-gradient(135deg,#10b981,#84cc16)
   background:linear-gradient(110deg, #7c3aed 0%, #db2777 45%, #f97316 75%, #06b6d4 100%) !important;
   box-shadow:0 4px 14px rgba(219,39,119,.35) !important}
 
+footer {display:none !important}
+
 #go-btn {min-height:64px; font-size:1.3rem; letter-spacing:.14rem; font-weight:900; border:none !important;
   color:#fff !important; border-radius:18px !important;
   background:linear-gradient(110deg, #7c3aed, #db2777, #f97316, #db2777, #7c3aed) !important;
@@ -466,6 +468,7 @@ if __name__ == "__main__":
         server_port=int(os.environ.get("REVO_PORT", "7860")),
         inbrowser=os.environ.get("REVO_OPEN_BROWSER") == "1",
         prevent_thread_lock=True,
+        footer_links=[],  # sin «Construido con Gradio» ni enlaces a la API
     )
     warm_up()
     demo.block_thread()
