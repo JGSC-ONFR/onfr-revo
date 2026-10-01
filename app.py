@@ -91,6 +91,10 @@ button.mode-btn.secondary {border:2px solid rgba(124,58,237,.35) !important}
 # carga los modelos de caras al arrancar, no en la primera foto
 FaceGuard.get()
 preload()  # LaMa se carga mientras eliges la foto
+if colorizer.available():  # y el modelo de color también
+    import threading
+
+    threading.Thread(target=colorizer._load, daemon=True).start()
 
 
 def mode_updates(mode):
