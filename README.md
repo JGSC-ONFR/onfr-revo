@@ -6,6 +6,12 @@ Prototipo local en Python con interfaz web (Gradio). Incluye los modos **Mejorar
 
 ## Cómo ejecutarlo
 
+### En Windows, con doble clic
+
+Abre **`Abrir ONFR REVO.bat`**. La primera vez instala todo en una carpeta `.venv` (tarda unos minutos), descarga los modelos faciales y crea un acceso directo **ONFR REVO** en el escritorio. Después solo hay que pinchar ese acceso directo: REVO se abre en el navegador. Mientras lo uses, deja abierta la ventana negra; al cerrarla se apaga REVO.
+
+### A mano
+
 Requiere Python 3.10 o superior.
 
 ```bash

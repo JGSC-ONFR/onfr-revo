@@ -140,4 +140,5 @@ if __name__ == "__main__":
         css=CSS,
         server_name=os.environ.get("REVO_HOST", "127.0.0.1"),
         server_port=int(os.environ.get("REVO_PORT", "7860")),
+        inbrowser=os.environ.get("REVO_OPEN_BROWSER") == "1",
     )

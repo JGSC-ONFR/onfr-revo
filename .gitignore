@@ -1,5 +1,5 @@
-models/*.dat
-__pycache__/
 *.pyc
-.venv/
 *_revo.png
+.venv/
+__pycache__/
+models/*.dat
