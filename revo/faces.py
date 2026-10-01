@@ -77,15 +77,22 @@ class FaceGuard:
     # ------------------------------------------------------------------ detección
     def detect(self, rgb: np.ndarray) -> list[Face]:
         """Detecta caras en una imagen RGB uint8. Trabaja sobre una copia
-        normalizada en contraste (solo para detectar; no modifica la imagen)."""
+        reducida y normalizada en contraste (solo para detectar; no modifica
+        la imagen). Primero a 800 px (rápido); si no encuentra nada, repite
+        con más resolución y, si hace falta, con el detector CNN."""
         h, w = rgb.shape[:2]
-        scale = min(1.0, 1600.0 / max(h, w))
-        small = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else rgb
-        gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
-        gray = cv2.createCLAHE(2.0, (8, 8)).apply(gray)
-
-        rects = list(self.hog(gray, 1))
-        if not rects and os.path.exists(self.cnn_path) and max(small.shape[:2]) <= 1200:
+        rects, scale = [], 1.0
+        for side in (800, 1600):
+            scale = min(1.0, side / max(h, w))
+            small = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else rgb
+            gray = cv2.createCLAHE(2.0, (8, 8)).apply(cv2.cvtColor(small, cv2.COLOR_RGB2GRAY))
+            rects = list(self.hog(gray, 1))
+            if rects or scale == 1.0:
+                break
+        if not rects and os.path.exists(self.cnn_path):
+            scale = min(1.0, 900.0 / max(h, w))
+            small = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else rgb
+            gray = cv2.createCLAHE(2.0, (8, 8)).apply(cv2.cvtColor(small, cv2.COLOR_RGB2GRAY))
             if self._cnn is None:
                 self._cnn = dlib.cnn_face_detection_model_v1(self.cnn_path)
             rects = [d.rect for d in self._cnn(gray, 1) if d.confidence > 0.5]

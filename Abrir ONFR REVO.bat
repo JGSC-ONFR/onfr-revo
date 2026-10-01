@@ -29,11 +29,14 @@ if not exist ".venv\Scripts\python.exe" (
 )
 set "VPY=.venv\Scripts\python.exe"
 
-if not exist ".venv\revo_instalado.txt" (
+rem v2: OpenCV con modulos extra (relleno y color) y onnxruntime (relleno IA)
+if not exist ".venv\revo_instalado_v2.txt" (
+    echo Actualizando REVO. Puede tardar unos minutos...
     "%VPY%" -m pip install --upgrade pip
+    "%VPY%" -m pip uninstall -y opencv-python-headless opencv-python >nul 2>nul
     "%VPY%" -m pip install -r requirements.txt
     if errorlevel 1 goto error
-    echo ok> ".venv\revo_instalado.txt"
+    echo ok> ".venv\revo_instalado_v2.txt"
 )
 
 rem --- 3. Modelos faciales (solo la primera vez) -------------------------

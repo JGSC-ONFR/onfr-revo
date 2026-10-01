@@ -63,11 +63,28 @@ def blockiness(gray: np.ndarray) -> float:
     return float(at8 / (other + 1e-6))
 
 
-def is_monochrome(rgb: np.ndarray) -> bool:
+def tone_deviation(rgb: np.ndarray) -> np.ndarray:
+    """Distancia de cada píxel (en el plano de color a, b) al «tono» de la foto
+    para su luminosidad. En una foto en blanco y negro o virada (sepia), el
+    color depende solo de la luminosidad; lo que se sale de esa curva es
+    ajeno a la imagen: el papel blanco que asoma en una rotura, el soporte
+    de color, manchas químicas…"""
     lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
-    a, b = lab[..., 1] - 128, lab[..., 2] - 128
-    # una imagen virada tiene croma casi constante; una en color, variada
-    return float(np.std(a) + np.std(b)) < 6.0
+    L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
+    bins = np.clip((L / 16).astype(np.int32), 0, 15)
+    ea = np.full(16, np.median(a), np.float32)
+    eb = np.full(16, np.median(b), np.float32)
+    for i in range(16):
+        sel = bins == i
+        if sel.sum() > 50:
+            ea[i], eb[i] = np.median(a[sel]), np.median(b[sel])
+    return np.hypot(a - ea[bins], b - eb[bins])
+
+
+def is_monochrome(rgb: np.ndarray) -> bool:
+    """Blanco y negro o virado: casi todos los píxeles siguen la curva de tono
+    (una rotura que deja ver otro color no cambia el veredicto)."""
+    return float(np.percentile(tone_deviation(rgb), 90)) < 10.0
 
 
 def analyze(rgb: np.ndarray) -> Analysis:

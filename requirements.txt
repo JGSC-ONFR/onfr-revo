@@ -1,5 +1,6 @@
 numpy>=1.24
-opencv-python-headless>=4.8
+opencv-contrib-python-headless>=4.10,<5   # OpenCV 5 ya no lee el modelo de color (Caffe)
 gradio>=6.0
 dlib-bin>=19.24        # si no hay binario para tu sistema: pip install dlib (requiere CMake)
+onnxruntime>=1.18      # relleno IA (LaMa); sin él se usa el relleno clásico
 scikit-image>=0.22     # solo para generar las imágenes de prueba

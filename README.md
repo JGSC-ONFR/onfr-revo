@@ -19,7 +19,7 @@ cd onfr-revo
 python -m venv .venv
 # Windows: .venv\Scripts\activate      macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-python setup_models.py        # descarga los modelos faciales (~130 MB, una sola vez)
+python setup_models.py        # modelos de caras, color y relleno IA (una sola vez)
 python app.py                 # abre http://127.0.0.1:7860
 ```
 

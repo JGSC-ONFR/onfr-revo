@@ -166,3 +166,101 @@ def local_contrast(rgb: np.ndarray, intensity: float) -> np.ndarray:
     alpha = 0.2 + 0.35 * intensity
     lab[..., 0] = cv2.addWeighted(clahe.apply(L), alpha, L, 1 - alpha, 0)
     return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
+
+def detect_damage(
+    rgb: np.ndarray,
+    monochrome: bool,
+    face_mask: np.ndarray | None = None,
+    feature_mask: np.ndarray | None = None,
+    intensity: float = 0.5,
+) -> tuple[np.ndarray, dict]:
+    """Daños grandes que `detect_defects` no cubre: roturas, papel arrancado,
+    marcas o desconchones. Solo en fotos en blanco y negro o viradas, donde
+    el daño se delata porque su color no sigue el tono de la foto (el papel
+    blanco o el soporte que asoma). En fotos en color se usa el pincel.
+
+    Nunca marca nada sobre una cara ni pegado al borde de la foto (los bordes
+    rotos se reparan con el pincel).
+    """
+    from .analysis import tone_deviation
+
+    h, w = rgb.shape[:2]
+    out = np.zeros((h, w), np.uint8)
+    info = {"regions": 0}
+    if not monochrome:
+        return out, info
+    dev = tone_deviation(rgb)
+    L = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)[..., 0].astype(np.float32)
+    thr = 10.0 - 3.0 * intensity
+    cand = (dev > thr).astype(np.uint8)
+    cand = cv2.morphologyEx(cand, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    cand = cv2.morphologyEx(cand, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    min_area = max(30, h * w // 20000)
+    margin = int(0.02 * min(h, w))
+    face = (face_mask > 0.05) if face_mask is not None else np.zeros((h, w), bool)
+    feat = (feature_mask > 0.5) if feature_mask is not None else np.zeros((h, w), bool)
+    soft = (dev > 0.6 * thr).astype(np.uint8)
+
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
+    for i in range(1, n):
+        x, y, ww, hh, area = stats[i]
+        if area < 25 or area > 0.015 * h * w:
+            continue
+        if x < margin or y < margin or x + ww > w - margin or y + hh > h - margin:
+            continue
+        comp = lab == i
+        ring = (cv2.dilate(comp.astype(np.uint8), np.ones((15, 15), np.uint8)) > 0) & ~comp
+        d_mean = float(dev[comp].mean())
+        l_in, l_ring = float(L[comp].mean()), float(np.median(L[ring]))
+        # rotura grande: zona amplia claramente fuera de tono
+        # (si solo cambia el color pero no la luminosidad, es una mancha: se
+        # corrige con retone_stains sin rellenar nada)
+        big_tear = area >= 0.001 * h * w and d_mean >= 11 - 2 * intensity and abs(l_in - l_ring) >= 25
+        # desconchón o marca: papel claro sobre zona bastante más oscura
+        bright_mark = d_mean >= 9 and l_in >= 160 and l_in - l_ring >= 45 - 10 * intensity
+        if area < min_area and not (bright_mark and l_in - l_ring >= 60):
+            continue
+        if not (big_tear or bright_mark):
+            continue
+        if (comp & (face | feat)).any():
+            continue
+        # crecer hacia el borde de papel roto que rodea el daño: blanco (más
+        # claro que el fondo) o fuera de tono
+        r = max(4, int(np.sqrt(area) * (0.3 if big_tear else 0.15)))
+        grown = cv2.dilate(comp.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))) > 0
+        paper = L >= max(222.0, l_ring + 12)
+        edge = grown & ((soft > 0) | paper)
+        edge = cv2.morphologyEx(edge.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
+        region = (comp | edge) & ~face & ~feat
+        region = cv2.dilate(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        out[region & ~feat] = 255
+        info["regions"] += 1
+    return out, info
+
+
+def retone_stains(rgb: np.ndarray, intensity: float, protect: np.ndarray | None = None) -> tuple[np.ndarray, float]:
+    """Manchas de color en una foto en blanco y negro o virada (humedad,
+    químicos): se devuelve su color al tono de la foto. Solo cambia el color;
+    la luminosidad, y con ella todo el detalle, queda intacta."""
+    from .analysis import tone_deviation
+
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
+    bins = np.clip((L / 16).astype(np.int32), 0, 15)
+    ea = np.full(16, np.median(a), np.float32)
+    eb = np.full(16, np.median(b), np.float32)
+    for i in range(16):
+        sel = bins == i
+        if sel.sum() > 50:
+            ea[i], eb[i] = np.median(a[sel]), np.median(b[sel])
+    dev = tone_deviation(rgb)
+    thr = 9.0 - 3.0 * intensity
+    wgt = np.clip((dev - thr) / thr, 0, 1) * (0.6 + 0.4 * intensity)
+    wgt = cv2.GaussianBlur(wgt, (0, 0), 3)
+    if protect is not None:
+        wgt *= 1 - np.clip(protect, 0, 1)
+    lab[..., 1] = a + wgt * (ea[bins] - a)
+    lab[..., 2] = b + wgt * (eb[bins] - b)
+    out = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return out, float((wgt > 0.2).mean())

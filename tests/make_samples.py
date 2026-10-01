@@ -31,6 +31,25 @@ def old_photo(rgb):
     return np.clip(sepia, 0, 255).astype(np.uint8)
 
 
+def torn_photo(rgb):
+    """Foto antigua con una rotura junto a la cara (se ve el soporte rojizo
+    con borde de papel blanco) y marcas blancas gruesas sobre ropa oscura."""
+    img = old_photo(rgb)
+    h, w = img.shape[:2]
+    pts = np.array([[300, 70], [326, 58], [345, 80], [338, 120], [312, 128], [298, 100]], np.int32)
+    paper = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(paper, [pts], 255)
+    paper = cv2.dilate(paper, np.ones((7, 7), np.uint8))
+    img[paper > 0] = (238, 236, 230)
+    inner = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(inner, [pts], 255)
+    inner = cv2.erode(inner, np.ones((3, 3), np.uint8))
+    img[inner > 0] = (150, 70, 55) + rng.normal(0, 6, (int((inner > 0).sum()), 3))
+    for (x, y, ww, hh) in ((185, 205, 22, 9), (215, 215, 8, 18), (240, 200, 14, 7)):
+        cv2.ellipse(img, (x, y), (ww // 2, hh // 2), 20, 0, 360, (225, 222, 215), -1)
+    return img
+
+
 def low_quality(rgb):
     small = cv2.resize(rgb, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
     small = np.clip(small + rng.normal(0, 6, small.shape), 0, 255).astype(np.uint8)
@@ -46,5 +65,6 @@ def save(name, rgb):
 astro = data.astronaut()
 save("astronauta_original.png", astro)
 save("foto_antigua.png", old_photo(astro))
+save("foto_rota.png", torn_photo(astro))
 save("foto_baja_calidad.jpg", low_quality(astro))
 save("cafe_baja_calidad.jpg", low_quality(data.coffee()))

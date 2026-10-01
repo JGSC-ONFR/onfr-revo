@@ -60,6 +60,34 @@ def test_processed_face_passes_verification():
                 assert f.check.passed or f.applied == 0, f.check
 
 
+def test_torn_photo_hole_is_filled_but_face_untouched():
+    rgb = load("foto_rota.png")
+    r = process(rgb, Settings(mode="restaurar", intensity=0.35))
+    assert r.stats["damage_regions"] >= 1, "no se detectó la rotura"
+    hole = r._masks["damage"] > 0
+    lab = cv2.cvtColor(r.image, cv2.COLOR_RGB2LAB).astype(np.float32)
+    chroma = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
+    before = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    chroma0 = np.hypot(before[..., 1] - 128, before[..., 2] - 128)
+    assert chroma[hole].mean() < chroma0[hole].mean() - 10, "la rotura sigue mostrando el soporte rojo"
+    face_m, feat_m = face_masks(rgb.shape, r._faces[0])
+    assert not hole[feat_m > 0.5].any() and not hole[face_m > 0.05].any(), "se tocó la cara"
+    assert r.faces[0].check.passed or r.faces[0].applied == 0
+
+
+def test_user_mask_on_face_is_smooth_not_invented():
+    """Si se pinta sobre un ojo, el relleno es liso (sin estructura nueva)."""
+    rgb = load("astronauta_original.png")
+    face = FaceGuard.get().detect(rgb)[0]
+    eye = face.landmarks[EYE_L].mean(0).astype(int)
+    mask = np.zeros(rgb.shape[:2], np.uint8)
+    cv2.circle(mask, tuple(eye), int(face.interocular * 0.25), 255, -1)
+    r = process(rgb, Settings(mode="restaurar", intensity=0.35, user_mask=mask))
+    region = r.image[mask > 0].astype(np.float32)
+    assert r.stats["filled_on_faces"] >= 1
+    assert region.std(0).mean() < rgb[mask > 0].astype(np.float32).std(0).mean(), "el relleno del ojo no es liso"
+
+
 def warp_mouth_and_eyes(rgb, face):
     """Simula una 'mejora' generativa que altera la expresión: sonrisa más
     ancha y ojos más grandes (lo que REVO nunca debe aceptar)."""
