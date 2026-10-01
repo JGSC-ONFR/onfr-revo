@@ -20,6 +20,7 @@ from .faces import MODELS_DIR
 
 SMALL = 60  # píxeles: por debajo, una mota
 LAMA = "lama_fp32.onnx"
+LAMA_MIN = 1500  # píxeles: por debajo, el relleno clásico basta
 BUDGET = 9_000  # píxeles del recorte reducido que procesa FSR (tiempo acotado)
 _lama = None
 
@@ -117,7 +118,10 @@ def fill(rgb: np.ndarray, mask: np.ndarray, face_mask: np.ndarray | None = None)
         # la zona de la cara se trata como hueco también, para que FSR no
         # copie textura de la cara hacia fuera ni al revés
         hole = (rest | face_part)[y0:y1, x0:x1].astype(np.uint8)
-        rec = _lama_fill(out[y0:y1, x0:x1], hole) if info["engine"] == "LaMa" else _fsr(out[y0:y1, x0:x1], hole)
+        # LaMa solo para daños grandes (≈2,5 s por llamada); los pequeños se
+        # rellenan bien y en milésimas con FSR
+        use_lama = info["engine"] == "LaMa" and rest.sum() >= LAMA_MIN
+        rec = _lama_fill(out[y0:y1, x0:x1], hole) if use_lama else _fsr(out[y0:y1, x0:x1], hole)
         sel = rest[y0:y1, x0:x1]
         out[y0:y1, x0:x1][sel] = rec[sel]
 

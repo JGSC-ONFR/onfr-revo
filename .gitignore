@@ -2,4 +2,5 @@
 *_revo.png
 .venv/
 __pycache__/
-models/*.dat
+models/*
+!models/.gitkeep
