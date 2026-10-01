@@ -121,7 +121,7 @@ def process(rgb: np.ndarray, settings: Settings, progress=None) -> Result:
 
     say(0.12, "Detectando rostros")
     guard = FaceGuard.get()
-    faces = guard.detect(rgb)
+    faces = guard.detect(rgb, embed=False)  # la identidad se mide luego sobre el recorte
     face_u = np.zeros((h, w), np.float32)
     feat_u = np.zeros((h, w), np.float32)
     for f in faces:
@@ -205,7 +205,7 @@ def process(rgb: np.ndarray, settings: Settings, progress=None) -> Result:
             face_px = b_crop + a * (g_crop - b_crop)
             cand = np.clip(o_crop * (1 - m) + face_px * m, 0, 255).astype(np.uint8)
             small = cand if scale == 1 else cv2.resize(cand, (X1 - X0, Y1 - Y0), interpolation=cv2.INTER_AREA)
-            chk = check_face(guard, ref, small, ref_img, fm_small, ignore[Y0:Y1, X0:X1], id_limit)
+            chk = check_face(guard, ref, small, ref_img, fm_small, ignore[Y0:Y1, X0:X1], id_limit, lazy=a > 0)
             if chk.passed or a == 0:
                 out[sy0:sy1, sx0:sx1] = cand
                 reports.append(FaceReport(n + 1, f.rect, a, chk, k + 1))

@@ -8,6 +8,7 @@ import base64
 import os
 import random
 import tempfile
+import time
 
 import cv2
 import gradio as gr
@@ -33,6 +34,7 @@ MODE_HELP = {
     "restaurar": "Fotos antiguas o deterioradas: polvo, manchas, arañazos, roturas, ruido y contraste. Mantiene la época y la resolución.",
     "mejorar_restaurar": "Proceso completo: restauración → recuperación de calidad → aumento de resolución.",
 }
+PREVIEW_SIDE = 1600  # px de la vista previa ANTES/DESPUÉS
 BRUSH = "#ff2bd6"
 MARK_RGBA = (255, 43, 214, 150)
 
@@ -146,6 +148,39 @@ def _background(ed):
     return np.ascontiguousarray(bg[..., :3])
 
 
+def _source(ed, original):
+    """La foto que se repara: siempre el original guardado al subirla, nunca
+    la copia (comprimida) que el editor reenvía."""
+    if original is not None and _has_image(ed):
+        return original
+    return _background(ed)
+
+
+def _has_image(ed):
+    if isinstance(ed, dict):
+        return ed.get("background") is not None
+    return ed is not None
+
+
+def _shrink(img, side, interp=cv2.INTER_AREA):
+    f = min(1.0, side / max(img.shape[:2]))
+    return cv2.resize(img, None, fx=f, fy=f, interpolation=interp) if f < 1 else img
+
+
+def _retrying(preprocess):
+    """A veces el navegador reenvía la imagen del editor mientras aún se
+    está escribiendo en disco; se reintenta en lugar de fallar."""
+    def wrapper(payload):
+        for k in range(20):
+            try:
+                return preprocess(payload)
+            except Exception:  # noqa: BLE001
+                if k == 19:
+                    raise
+                time.sleep(0.25)
+    return wrapper
+
+
 def _painted(ed, shape):
     """Máscara de lo pintado con el pincel (todas las capas)."""
     mask = np.zeros(shape[:2], np.uint8)
@@ -164,7 +199,7 @@ def _painted(ed, shape):
 def on_upload(ed, mode, user_picked, intensity):
     img = _background(ed)
     if img is None:
-        return gr.update(), "", gr.update(visible=False), mode, *mode_updates(mode)[1:]
+        return gr.update(), None, "", gr.update(visible=False), mode, *mode_updates(mode)[1:]
     big = max(img.shape[:2]) > MAX_WORK
     if big:  # fotos de móvil enormes: se trabaja a MAX_WORK px (mucho más rápido)
         f = MAX_WORK / max(img.shape[:2])
@@ -181,7 +216,7 @@ def on_upload(ed, mode, user_picked, intensity):
     # revisarlos (borrar o añadir) antes de reparar
     layer = np.zeros((*img.shape[:2], 4), np.uint8)
     if a.monochrome:
-        faces = FaceGuard.get().detect(img)
+        faces = FaceGuard.get().detect(img, embed=False)
         fu = np.zeros(img.shape[:2], np.float32)
         ft = np.zeros(img.shape[:2], np.float32)
         for f in faces:
@@ -197,11 +232,11 @@ def on_upload(ed, mode, user_picked, intensity):
     if not a.monochrome or not layer[..., 3].any():
         text += "\n\nSi ves agujeros o rasguños, píntalos con el pincel y REVO los rellenará."
     new_value = {"background": img, "layers": [layer], "composite": None}
-    return new_value, text, gr.update(visible=a.monochrome), mode, *mode_updates(mode)[1:]
+    return new_value, img, text, gr.update(visible=a.monochrome), mode, *mode_updates(mode)[1:]
 
 
-def anim_html(ed):
-    img = _background(ed)
+def anim_html(original):
+    img = original  # no se pide el editor aquí: exportarlo cuesta segundos en el navegador
     if img is None:
         return gr.update(visible=False), gr.update()
     h, w = img.shape[:2]
@@ -222,8 +257,8 @@ def anim_html(ed):
     return gr.update(value=html, visible=True), gr.update(visible=False)
 
 
-def run(ed, mode, intensity, scale, color_on, color_amount):
-    img = _background(ed)
+def run(ed, original, mode, intensity, scale, color_on, color_amount):
+    img = _source(ed, original)
     if img is None:
         raise gr.Error("Primero sube una imagen.")
     s = Settings(
@@ -252,17 +287,29 @@ def run(ed, mode, intensity, scale, color_on, color_amount):
             gr.update(value=None, visible=False),
         )
     out_path = os.path.join(tempfile.mkdtemp(prefix="revo_"), "revo_resultado.png")
-    cv2.imwrite(out_path, cv2.cvtColor(res.image, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(out_path, cv2.cvtColor(res.image, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_PNG_COMPRESSION, 1])
     t = res.stats["seconds"]
     return (
         res,
-        gr.update(value=(res.before, res.image), visible=True),
+        # vista previa ligera; «Guardar» da el PNG a resolución completa
+        gr.update(value=(_shrink(res.before, PREVIEW_SIDE), _shrink(res.image, PREVIEW_SIDE)), visible=True),
         gr.update(value="", visible=False),
         gr.update(value=out_path, visible=True),
         gr.update(visible=True),
         gr.update(value=f"_Listo en {t:.1f} s._", visible=True),
         gr.update(value="", visible=False),
         gr.update(value=None, visible=False),
+    )
+
+
+def failed():
+    return (
+        gr.update(value="", visible=False),
+        gr.update(visible=True),
+        gr.update(
+            value="**No se ha podido procesar la imagen.** Vuelve a pulsar el botón; si se repite, sube la foto otra vez.",
+            visible=True,
+        ),
     )
 
 
@@ -283,6 +330,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
     mode = gr.State("mejorar_restaurar")
     user_picked = gr.State(False)
     result = gr.State(None)
+    original = gr.State(None)
 
     with gr.Row():
         buttons = [
@@ -304,6 +352,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
                 layers=False,
                 height=520,
             )
+            editor.preprocess = _retrying(editor.preprocess)
             analysis_md = gr.Markdown()
             intensity = gr.Slider(0, 100, value=35, step=1, label="Intervención  ·  Conservadora ⟷ Intensa")
             with gr.Group(visible=False) as color_box:
@@ -329,7 +378,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
 
         with gr.Column(scale=1):
             anim = gr.HTML(visible=False)
-            slider = gr.ImageSlider(label="ANTES ⟷ DESPUÉS", type="numpy", format="png", max_height=560)
+            slider = gr.ImageSlider(label="ANTES ⟷ DESPUÉS", type="numpy", format="jpeg", max_height=560)
             done_md = gr.Markdown(visible=False)
             with gr.Row():
                 save = gr.DownloadButton("Guardar", visible=False, variant="primary", elem_id="save-btn")
@@ -348,15 +397,20 @@ with gr.Blocks(title="ONFR REVO") as demo:
 
     # el botón espera a que termine el análisis (y las marcas rosas)
     editor.upload(lambda: gr.update(interactive=False, value="Analizando la imagen…"), None, go).then(
-        on_upload, [editor, mode, user_picked, intensity], [editor, analysis_md, color_box, *mode_outputs]
+        on_upload, [editor, mode, user_picked, intensity], [editor, original, analysis_md, color_box, *mode_outputs]
     ).then(lambda m: gr.update(interactive=True, value=ACTION[m]), mode, go)
     color_on.change(lambda on: gr.update(visible=bool(on)), color_on, color_amount)
-    go.click(anim_html, editor, [anim, slider], show_progress="hidden").then(
+    start = go.click(anim_html, original, [anim, slider], show_progress="hidden")
+    work = start.then(
         run,
-        [editor, mode, intensity, scale, color_on, color_amount],
+        [editor, original, mode, intensity, scale, color_on, color_amount],
         [result, slider, anim, save, summary_btn, done_md, summary, imap],
         show_progress="hidden",
     )
+    # si algo falla antes de llegar a run (p. ej. al leer la imagen), la
+    # animación desaparece y sale un aviso en lugar de quedarse girando
+    for dep in (start, work):
+        dep.failure(failed, None, [anim, slider, done_md])
     summary_btn.click(show_summary, result, [summary, imap])
 
 

@@ -10,6 +10,8 @@ resto del pipeline pueda protegerlas y verificar que no han cambiado.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import os
 from dataclasses import dataclass, field
 
@@ -64,6 +66,7 @@ class FaceGuard:
         self.hog = dlib.get_frontal_face_detector()
         self.cnn_path = os.path.join(models_dir, "mmod_human_face_detector.dat")
         self._cnn = None
+        self._last = None  # (clave, caras): al subir la foto y al repararla es la misma
         self.shape68 = dlib.shape_predictor(p("shape_predictor_68_face_landmarks.dat"))
         self.shape5 = dlib.shape_predictor(p("shape_predictor_5_face_landmarks.dat"))
         self.recog = dlib.face_recognition_model_v1(p("dlib_face_recognition_resnet_model_v1.dat"))
@@ -75,7 +78,15 @@ class FaceGuard:
         return cls._instance
 
     # ------------------------------------------------------------------ detección
-    def detect(self, rgb: np.ndarray) -> list[Face]:
+    def detect(self, rgb: np.ndarray, embed: bool = True) -> list[Face]:
+        key = (hashlib.blake2b(np.ascontiguousarray(rgb).data, digest_size=16).digest(), rgb.shape, embed)
+        if self._last is not None and self._last[0] == key:
+            return copy.deepcopy(self._last[1])
+        faces = self._detect(rgb, embed)
+        self._last = (key, copy.deepcopy(faces))
+        return faces
+
+    def _detect(self, rgb: np.ndarray, embed: bool) -> list[Face]:
         """Detecta caras en una imagen RGB uint8. Trabaja sobre una copia
         reducida y normalizada en contraste (solo para detectar; no modifica
         la imagen). Primero a 800 px (rápido); si no encuentra nada, repite
@@ -104,7 +115,10 @@ class FaceGuard:
             if x1 - x0 < 12 or y1 - y0 < 12:
                 continue
             face = Face(rect=(x0, y0, x1, y1), landmarks=np.zeros((68, 2)))
-            self.describe(rgb, face)
+            if embed:
+                self.describe(rgb, face)
+            else:
+                face.landmarks = self.landmarks(rgb, face.rect)
             faces.append(face)
         return faces
 

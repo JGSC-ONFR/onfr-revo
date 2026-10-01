@@ -209,10 +209,16 @@ def detect_damage(
             continue
         if x < margin or y < margin or x + ww > w - margin or y + hh > h - margin:
             continue
-        comp = lab == i
+        # todo se calcula sobre un recorte alrededor del daño (antes, sobre la
+        # imagen entera por cada componente: unos 2 s en total)
+        p = max(4, int(np.sqrt(area) * 0.3)) + 12
+        ys = slice(max(0, y - p), min(h, y + hh + p))
+        xs = slice(max(0, x - p), min(w, x + ww + p))
+        comp = lab[ys, xs] == i
+        Lc, fc, ftc = L[ys, xs], face[ys, xs], feat[ys, xs]
         ring = (cv2.dilate(comp.astype(np.uint8), np.ones((15, 15), np.uint8)) > 0) & ~comp
-        d_mean = float(dev[comp].mean())
-        l_in, l_ring = float(L[comp].mean()), float(np.median(L[ring]))
+        d_mean = float(dev[ys, xs][comp].mean())
+        l_in, l_ring = float(Lc[comp].mean()), float(np.median(Lc[ring]))
         # rotura grande: zona amplia claramente fuera de tono
         # (si solo cambia el color pero no la luminosidad, es una mancha: se
         # corrige con retone_stains sin rellenar nada)
@@ -223,18 +229,18 @@ def detect_damage(
             continue
         if not (big_tear or bright_mark):
             continue
-        if (comp & (face | feat)).any():
+        if (comp & (fc | ftc)).any():
             continue
         # crecer hacia el borde de papel roto que rodea el daño: blanco (más
         # claro que el fondo) o fuera de tono
         r = max(4, int(np.sqrt(area) * (0.3 if big_tear else 0.15)))
         grown = cv2.dilate(comp.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))) > 0
-        paper = L >= max(222.0, l_ring + 12)
-        edge = grown & ((soft > 0) | paper)
+        paper = Lc >= max(222.0, l_ring + 12)
+        edge = grown & ((soft[ys, xs] > 0) | paper)
         edge = cv2.morphologyEx(edge.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
-        region = (comp | edge) & ~face & ~feat
+        region = (comp | edge) & ~fc & ~ftc
         region = cv2.dilate(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
-        out[region & ~feat] = 255
+        out[ys, xs][region & ~ftc] = 255
         info["regions"] += 1
     return out, info
 

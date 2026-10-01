@@ -1,6 +1,7 @@
 """Análisis automático de la imagen: decide qué opciones son relevantes."""
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 import cv2
@@ -63,12 +64,19 @@ def blockiness(gray: np.ndarray) -> float:
     return float(at8 / (other + 1e-6))
 
 
+_tone_last = None  # (clave, resultado): se pide varias veces por foto
+
+
 def tone_deviation(rgb: np.ndarray) -> np.ndarray:
     """Distancia de cada píxel (en el plano de color a, b) al «tono» de la foto
     para su luminosidad. En una foto en blanco y negro o virada (sepia), el
     color depende solo de la luminosidad; lo que se sale de esa curva es
     ajeno a la imagen: el papel blanco que asoma en una rotura, el soporte
     de color, manchas químicas…"""
+    global _tone_last
+    key = (hashlib.blake2b(np.ascontiguousarray(rgb).data, digest_size=16).digest(), rgb.shape)
+    if _tone_last is not None and _tone_last[0] == key:
+        return _tone_last[1].copy()
     lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
     bins = np.clip((L / 16).astype(np.int32), 0, 15)
@@ -78,7 +86,9 @@ def tone_deviation(rgb: np.ndarray) -> np.ndarray:
         sel = bins == i
         if sel.sum() > 50:
             ea[i], eb[i] = np.median(a[sel]), np.median(b[sel])
-    return np.hypot(a - ea[bins], b - eb[bins])
+    out = np.hypot(a - ea[bins], b - eb[bins])
+    _tone_last = (key, out)
+    return out.copy()
 
 
 def is_monochrome(rgb: np.ndarray) -> bool:

@@ -72,16 +72,13 @@ def check_face(
     face_mask: np.ndarray,
     ignore_mask: np.ndarray | None = None,
     id_limit: float = MIN_IDENTITY,
+    lazy: bool = False,
 ) -> FaceCheck:
-    """candidate y reference a la resolución original."""
+    """candidate y reference a la resolución original. Con `lazy`, la
+    identidad (la prueba más lenta) se omite si geometría o estructura ya han
+    fallado: el intento se descarta igualmente."""
     lm = guard.landmarks(candidate, face.rect)
     lm_dev = float(np.linalg.norm(lm - face.landmarks, axis=1).mean() / face.interocular)
-
-    ident = None
-    if face.embedding is not None:
-        emb = guard.embedding(candidate, face.rect)
-        if emb is not None:
-            ident = float(np.linalg.norm(emb - face.embedding))
 
     x0, y0, x1, y1 = face.rect
     pad = int(0.4 * (x1 - x0))
@@ -94,4 +91,10 @@ def check_face(
     if ignore_mask is not None:
         w *= (ignore_mask[ys, xs] == 0)
     struct = float((np.abs(a - b) * w).sum() / max(1e-6, w.sum()))
+
+    ident = None
+    if face.embedding is not None and (not lazy or (lm_dev <= MAX_LANDMARKS and struct <= MAX_STRUCTURE)):
+        emb = guard.embedding(candidate, face.rect)
+        if emb is not None:
+            ident = float(np.linalg.norm(emb - face.embedding))
     return FaceCheck(ident, lm_dev, struct, id_limit)
