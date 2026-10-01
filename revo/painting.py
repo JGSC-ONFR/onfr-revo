@@ -38,7 +38,7 @@ def clean_varnish(rgb: np.ndarray, intensity: float) -> tuple[np.ndarray, dict]:
     lights = L >= np.percentile(L, 97)
     cast_a = float(np.median(a[lights]) - 128)
     cast_b = float(np.median(b[lights]) - 128)
-    k = 0.35 + 0.45 * intensity  # fracción del tono amarillento que se quita
+    k = 0.35 + 0.25 * intensity  # fracción del tono amarillento que se quita
     da = -np.clip(cast_a, -12, 12) * k
     db = -np.clip(cast_b, -25, 25) * k
     # el velo pesa más en las luces que en las sombras
@@ -47,7 +47,7 @@ def clean_varnish(rgb: np.ndarray, intensity: float) -> tuple[np.ndarray, dict]:
     b2 = b + db * wl
     # suciedad: niveles (negro y blanco) con un recorte muy suave
     lo, hi = np.percentile(L, 0.5), np.percentile(L, 99.5)
-    t = 0.3 + 0.5 * intensity
+    t = 0.3 + 0.3 * intensity
     lo_t, hi_t = lo * (1 - t), hi + (250 - hi) * t
     L2 = np.clip((L - lo) * (hi_t - lo_t) / max(1.0, hi - lo) + lo_t, 0, 255)
     out = cv2.merge([np.asarray(c, np.float32) for c in (L2, np.clip(a2, 0, 255), np.clip(b2, 0, 255))]).astype(np.uint8)
