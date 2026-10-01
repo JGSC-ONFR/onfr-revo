@@ -18,7 +18,7 @@ from revo import colorize as colorizer
 from revo import restore
 from revo.analysis import analyze
 from revo.faces import FaceGuard, face_masks
-from revo.inpaint import lama_available
+from revo.inpaint import lama_available, preload
 from revo.pipeline import intervention_map, summary_lines
 
 MODE_BUTTONS = [
@@ -72,6 +72,7 @@ CSS = """
 
 # carga los modelos de caras al arrancar, no en la primera foto
 FaceGuard.get()
+preload()  # LaMa se carga mientras eliges la foto
 
 
 def mode_updates(mode):

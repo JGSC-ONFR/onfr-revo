@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import threading
 
 import cv2
 import numpy as np
@@ -23,6 +24,7 @@ LAMA = "lama_fp32.onnx"
 LAMA_MIN = 1500  # píxeles: por debajo, el relleno clásico basta
 BUDGET = 9_000  # píxeles del recorte reducido que procesa FSR (tiempo acotado)
 _lama = None
+_lama_lock = threading.Lock()
 
 
 def lama_available(models_dir: str = MODELS_DIR) -> bool:
@@ -37,11 +39,19 @@ def lama_available(models_dir: str = MODELS_DIR) -> bool:
 
 def _lama_session():
     global _lama
-    if _lama is None:
-        import onnxruntime as ort
+    with _lama_lock:  # si la precarga está en marcha, se espera a ella
+        if _lama is None:
+            import onnxruntime as ort
 
-        _lama = ort.InferenceSession(os.path.join(MODELS_DIR, LAMA), providers=["CPUExecutionProvider"])
+            _lama = ort.InferenceSession(os.path.join(MODELS_DIR, LAMA), providers=["CPUExecutionProvider"])
     return _lama
+
+
+def preload() -> None:
+    """Carga LaMa en segundo plano (≈13 s en un portátil) para que la
+    primera foto no tenga que esperarla."""
+    if lama_available():
+        threading.Thread(target=_lama_session, daemon=True).start()
 
 
 def _lama_fill(crop: np.ndarray, hole: np.ndarray) -> np.ndarray:
