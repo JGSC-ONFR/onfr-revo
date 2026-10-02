@@ -4,3 +4,4 @@
 __pycache__/
 models/*
 !models/.gitkeep
+revo_config.json
