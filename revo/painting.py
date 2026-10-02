@@ -67,6 +67,8 @@ NET = 0
 
 
 STRAIGHT = 0.5
+SOLID = 0.55  # zona clara maciza = objeto pintado, no racimo de desconchones
+GROW = 3  # píxeles que se amplía cada desconchón hasta su borde real
 
 
 def _straight(comp: np.ndarray) -> float:
@@ -367,6 +369,31 @@ def refine_brush(rgb: np.ndarray, brush: np.ndarray, intensity: float) -> np.nda
 
 
 # --------------------------------------------------------------- desconchados
+def _painted_whites(Lf: np.ndarray, C: np.ndarray, size: int) -> np.ndarray:
+    """Objetos pintados de blanco o crema (un gato blanco, un cuello): zonas
+    claras grandes y macizas. Su borde contra la pintura de alrededor no es
+    un desconchón. Una zona desconchada, en cambio, es un racimo de islas
+    sueltas: grande pero hueca. Devuelve los objetos macizos con su borde: dentro, una
+    laguna blanca sobre blanco no se distingue de la pintura y se deja."""
+    light = ((Lf > 185) & (C < 34)).astype(np.uint8)
+    light = cv2.morphologyEx(light, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab_i, stats, _ = cv2.connectedComponentsWithStats(light, connectivity=8)
+    out = np.zeros(Lf.shape, bool)
+    min_area = (0.04 * size) ** 2
+    band = max(3, int(0.006 * size)) | 1
+    for j in range(1, n):
+        if stats[j, cv2.CC_STAT_AREA] < min_area:
+            continue
+        x, y, w, h = stats[j, :4]
+        comp = (lab_i[y:y + h, x:x + w] == j).astype(np.uint8)
+        filled = cv2.morphologyEx(comp, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+        hull = cv2.convexHull(cv2.findNonZero(filled))
+        if comp.sum() / max(1.0, cv2.contourArea(hull)) < SOLID:
+            continue
+        out[y:y + h, x:x + w] |= cv2.dilate(filled, np.ones((band, band), np.uint8)) > 0
+    return out
+
+
 def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | None = None) -> np.ndarray:
     """Desconchados: muchas islas de pintura caída que dejan ver la
     preparación (crema o blanca, casi sin color), claramente más claras que
@@ -410,11 +437,28 @@ def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
         by_color &= ~on_feat | ((dist < 11) & (Lf - bg2 > 20 * s))
     # un blanco puro y saturado es un reflejo pintado, no la preparación
     strong &= Lf < 248
-    m = (strong | by_color).astype(np.uint8)
+    whites = _painted_whites(Lf, C, max(h, w))
+    m = (strong | by_color) & ~whites
+    # el borde de cada desconchón: la preparación sigue unos píxeles más
+    # allá de lo que salta a la vista (si no, queda un cerco claro)
+    ring = (dist < 18 * (0.8 + 0.4 * intensity)) & (Lf - bg2 > 4 * s) & ~whites
+    if feature_mask is not None:
+        ring &= feature_mask < 0.5
+    for _ in range(GROW):
+        m |= (cv2.dilate(m.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & ring
+    m = m.astype(np.uint8)
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     # trocitos sueltos de 1-2 px son grano o brillo, no desconchados
     n, lab_i, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
     small = stats[:, cv2.CC_STAT_AREA] < 6
     small[0] = False
     m[small[lab_i]] = 0
+    # racimo denso (la pintura caída a trozos, como un colador): se rellena
+    # entero, porque lo que queda entre los huecos también es preparación
+    kd = max(5, int(0.009 * max(h, w))) | 1
+    dense = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kd, kd))) > 0
+    dense &= ~whites
+    if feature_mask is not None:
+        dense &= feature_mask < 0.5
+    m |= dense.astype(np.uint8)
     return cv2.dilate(m, np.ones((3, 3), np.uint8)) * 255

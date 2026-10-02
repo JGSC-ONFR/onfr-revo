@@ -321,13 +321,26 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
     fill_info = {"on_faces": 0, "engine": "FSR"}
     plain = work
     if holes.any():
-        plain, fill_info = inpaint.fill(work, holes, face_u)
+        # con LaMa la piel de la cara también se rellena con IA (ojos, nariz
+        # y boca nunca son hueco); sin él, a lo liso
+        lama = inpaint.lama_available()
+        plain, fill_info = inpaint.fill(work, holes, None if lama else face_u)
+        if settings.auto_damage:
+            # segunda pasada: lo que el relleno dejó a la vista entre tanto
+            # desconchón (restos claros sueltos) se ve ahora aislado
+            # (fuera de las caras: allí el relleno ya es el definitivo)
+            again = painting.detect_flakes(plain, i, feat_u)
+            again[face_u > 0.05] = 0
+            if again.any():
+                plain = inpaint.fill(plain, again, None if lama else face_u)[0]
+                holes = ((holes > 0) | (again > 0)).astype(np.uint8)
     work = plain
 
     # caras: lo que falta de un lado se toma del otro lado, sano, del propio
-    # cuadro (reflejado, alineado con sus puntos y con la luz del sitio)
+    # cuadro (reflejado, alineado con sus puntos y con la luz del sitio).
+    # Con LaMa no hace falta: su relleno de la piel casa mejor que el reflejo
     sym = np.zeros((h, w), bool)
-    if holes.any() and faces:
+    if holes.any() and faces and fill_info.get("engine") != "LaMa":
         say(0.55, "Reconstruyendo la cara a partir de su lado sano")
         hole_d = cv2.dilate(holes, np.ones((3, 3), np.uint8))
         for fc in faces:

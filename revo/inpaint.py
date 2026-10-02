@@ -176,7 +176,9 @@ def fill(rgb: np.ndarray, mask: np.ndarray, face_mask: np.ndarray | None = None)
             sel = rest_mask[y0:y1, x0:x1]
             if not sel.any():
                 continue
-            hole = (sel | face_hole[y0:y1, x0:x1] | big_rest[y0:y1, x0:x1] | mid_rest[y0:y1, x0:x1]).astype(np.uint8)
+            # todo el daño del recorte cuenta como hueco (también las motas):
+            # si no, el relleno copia la textura del desconchado de al lado
+            hole = ((m[y0:y1, x0:x1] > 0) | face_hole[y0:y1, x0:x1]).astype(np.uint8)
             try:
                 rec = fn(out[y0:y1, x0:x1], hole)
             except Exception:  # noqa: BLE001  si LaMa falla, relleno clásico
