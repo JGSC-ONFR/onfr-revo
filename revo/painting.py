@@ -68,6 +68,9 @@ NET = 0
 
 STRAIGHT = 0.5
 SOLID = 0.55  # zona clara maciza = objeto pintado, no racimo de desconchones
+TAME_K = 1.0  # cuántas desviaciones por encima de la luz de alrededor puede quedar un relleno
+PALE_L, PALE_C = 8.0, 10.0  # mancha más clara y más apagada que su entorno
+BODY = 0.006  # fracción (lado largo²) a partir de la cual una zona blanca maciza es un cuerpo pintado
 GROW = 3  # píxeles que se amplía cada desconchón hasta su borde real
 
 
@@ -369,13 +372,65 @@ def refine_brush(rgb: np.ndarray, brush: np.ndarray, intensity: float) -> np.nda
 
 
 # --------------------------------------------------------------- desconchados
-def _painted_whites(Lf: np.ndarray, C: np.ndarray, size: int) -> np.ndarray:
+def eye_mask(shape, faces) -> np.ndarray:
+    """Ojos de cada cara (su blanco es pintura, aunque sea claro y sin
+    color como la preparación)."""
+    from .faces import EYE_L, EYE_R
+
+    h, w = shape[:2]
+    m = np.zeros((h, w), np.uint8)
+    for f in faces:
+        k = max(3, int(0.15 * f.interocular)) | 1
+        for idx in (EYE_L, EYE_R):
+            cv2.fillConvexPoly(m, cv2.convexHull(f.landmarks[idx].astype(np.int32)), 1)
+        m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    return m > 0
+
+
+def residual_losses(rgb: np.ndarray, intensity: float, eyes: np.ndarray | None = None,
+                    face_mask: np.ndarray | None = None, feature_mask: np.ndarray | None = None) -> np.ndarray:
+    """Preparación que aún asoma tras rellenar: islas claras, casi sin color
+    y bastante más claras que la pintura de alrededor, fuera de los blancos
+    pintados y de los ojos. Sobre la piel de una cara solo cuenta lo que es
+    claramente preparación, y junto a nariz y boca solo lo inconfundible."""
+    lab = _lab(rgb)
+    L = lab[..., 0]
+    Lf = L.astype(np.float32)
+    a = lab[..., 1].astype(np.float32) - 128
+    C = np.hypot(a, lab[..., 2].astype(np.float32) - 128)
+    h, w = L.shape
+    k = max(15, int(0.035 * max(h, w))) | 1
+    bg = cv2.medianBlur(L, min(k, 255)).astype(np.float32)
+    s = 1.0 - 0.3 * intensity
+    m = (Lf > 165) & (C < 32) & (Lf - bg > 22 * s) & (Lf < 250)
+    whites = _painted_whites(Lf, C, a, max(h, w))
+    if face_mask is not None:
+        whites &= face_mask <= 0.05  # la piel clara no es un «blanco pintado»
+    m &= ~whites
+    if eyes is not None:
+        m &= ~eyes
+    if face_mask is not None:
+        skin = face_mask > 0.05
+        m &= ~skin | ((C < 20) & (Lf - bg > 32 * s))
+        if feature_mask is not None:
+            near = cv2.dilate((feature_mask > 0.3).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+            m &= ~near | ((C < 24) & (Lf - bg > 40 * s) & (Lf > 185))
+    m = m.astype(np.uint8)
+    n, lab_i, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    keep = st[:, cv2.CC_STAT_AREA] >= 8  # lo más pequeño es grano de la tela
+    keep[0] = False
+    return cv2.dilate(keep[lab_i].astype(np.uint8), np.ones((5, 5), np.uint8)) * 255
+
+
+def _painted_whites(Lf: np.ndarray, C: np.ndarray, a: np.ndarray, size: int) -> np.ndarray:
     """Objetos pintados de blanco o crema (un gato blanco, un cuello): zonas
     claras grandes y macizas. Su borde contra la pintura de alrededor no es
     un desconchón. Una zona desconchada, en cambio, es un racimo de islas
     sueltas: grande pero hueca. Devuelve los objetos macizos con su borde: dentro, una
     laguna blanca sobre blanco no se distingue de la pintura y se deja."""
-    light = ((Lf > 185) & (C < 34)).astype(np.uint8)
+    # blanco o crema de verdad: claro, casi sin color y no verdoso (una pared
+    # verde clara no es un objeto blanco)
+    light = ((Lf > 185) & (C < 26) & (a > -2)).astype(np.uint8)
     light = cv2.morphologyEx(light, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n, lab_i, stats, _ = cv2.connectedComponentsWithStats(light, connectivity=8)
     out = np.zeros(Lf.shape, bool)
@@ -391,6 +446,18 @@ def _painted_whites(Lf: np.ndarray, C: np.ndarray, size: int) -> np.ndarray:
         if comp.sum() / max(1.0, cv2.contourArea(hull)) < SOLID:
             continue
         out[y:y + h, x:x + w] |= cv2.dilate(filled, np.ones((band, band), np.uint8)) > 0
+    # cuerpo grande y macizo (un gato blanco con desconchones encima): lo que
+    # sobrevive a una apertura ancha es materia pintada, no islas sueltas; se
+    # protege entero con sus salientes (orejas, patas)
+    ko = max(5, int(0.008 * size)) | 1
+    core = cv2.morphologyEx(light, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ko, ko)))
+    n2, lab2, st2, _ = cv2.connectedComponentsWithStats(core, connectivity=8)
+    for j in range(1, n2):
+        if st2[j, cv2.CC_STAT_AREA] < BODY * size * size:
+            continue
+        x, y, w, h = st2[j, :4]
+        comp = (lab2[y:y + h, x:x + w] == j).astype(np.uint8)
+        out[y:y + h, x:x + w] |= cv2.dilate(comp, np.ones((band, band), np.uint8)) > 0
     return out
 
 
@@ -437,7 +504,7 @@ def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
         by_color &= ~on_feat | ((dist < 11) & (Lf - bg2 > 20 * s))
     # un blanco puro y saturado es un reflejo pintado, no la preparación
     strong &= Lf < 248
-    whites = _painted_whites(Lf, C, max(h, w))
+    whites = _painted_whites(Lf, C, a, max(h, w))
     m = (strong | by_color) & ~whites
     # el borde de cada desconchón: la preparación sigue unos píxeles más
     # allá de lo que salta a la vista (si no, queda un cerco claro)
@@ -453,6 +520,31 @@ def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
     small = stats[:, cv2.CC_STAT_AREA] < 6
     small[0] = False
     m[small[lab_i]] = 0
+    # sobre pintura de color (piel, vestido) la preparación se ve como una
+    # mancha más clara y más apagada que lo que la rodea
+    km = max(9, int(0.015 * max(h, w))) | 1
+    Lmed = cv2.medianBlur(L, min(km, 255)).astype(np.float32)
+    Cmed = cv2.medianBlur(np.clip(C, 0, 255).astype(np.uint8), min(km, 255)).astype(np.float32)
+    pale = (Lf - Lmed > PALE_L * s) & (Cmed - C > PALE_C * s) & (C < 30) & (Lf > 150)
+    # sobre piel clara casi no cambia el color, pero sí la luz: junto a otros
+    # desconchones, lo bastante más claro que su entorno y del color de la
+    # preparación también lo es
+    pale |= (Lf - Lmed > 14 * s) & (dist < 20) & (C <= Cmed + 3) & (cv2.dilate(m, np.ones((r, r), np.uint8)) > 0)
+    # lejos de otros desconchones solo si salta mucho a la vista
+    clear = (Lf - Lmed > 3 * PALE_L * s) & (Cmed - C > 2 * PALE_C * s)
+    pale &= (cv2.dilate(m, np.ones((r, r), np.uint8)) > 0) | clear
+    if feature_mask is not None:
+        pale &= feature_mask < 0.5
+    pale = cv2.morphologyEx(pale.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8)) > 0
+    m |= (pale & ~whites).astype(np.uint8)
+    # salvo motas de preparación sobre pintura oscura, cerca de otros
+    # desconchones: ahí un punto claro de 1-2 px no es grano, y si se deja,
+    # el relleno lo toma como modelo y repite el moteado
+    specks = (Lf - bg > 70 * s) & (C < 32) & (Lf > 150)
+    specks &= cv2.dilate(m, np.ones((r, r), np.uint8)) > 0
+    if feature_mask is not None:
+        specks &= feature_mask < 0.5
+    m |= (specks & ~whites).astype(np.uint8)
     # racimo denso (la pintura caída a trozos, como un colador): se rellena
     # entero, porque lo que queda entre los huecos también es preparación
     kd = max(5, int(0.009 * max(h, w))) | 1
@@ -462,3 +554,35 @@ def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
         dense &= feature_mask < 0.5
     m |= dense.astype(np.uint8)
     return cv2.dilate(m, np.ones((3, 3), np.uint8)) * 255
+
+
+def tame_fill(filled: np.ndarray, before: np.ndarray, holes: np.ndarray) -> np.ndarray:
+    """El relleno IA a veces copia la textura del desconchado de al lado
+    (motas claras, la trama del lienzo) dentro del hueco. Dentro de cada
+    hueco nada puede quedar más claro que la pintura sana de alrededor: lo
+    que se pasa se baja a su luz y a su color."""
+    hb = holes > 0
+    if not hb.any():
+        return filled
+    lab = cv2.cvtColor(filled, cv2.COLOR_RGB2LAB).astype(np.float32)
+    ref = cv2.cvtColor(before, cv2.COLOR_RGB2LAB).astype(np.float32)
+    known = (~cv2.dilate(hb.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)).astype(np.float32)
+    sg = max(6.0, 0.025 * max(hb.shape))
+    wk = cv2.GaussianBlur(known, (0, 0), sg) + 1e-4
+    mu = [cv2.GaussianBlur(ref[..., c] * known, (0, 0), sg) / wk for c in range(3)]
+    var = cv2.GaussianBlur(ref[..., 0] ** 2 * known, (0, 0), sg) / wk - mu[0] ** 2
+    top = mu[0] + TAME_K * np.sqrt(np.maximum(var, 1.0)) + 4
+    L = lab[..., 0]
+    over = np.maximum(L - top, 0) * hb
+    t = np.clip(over / 12, 0, 1)
+    lab[..., 0] = L - over
+    # y nada de un color que no esté alrededor (un tono marrón sobre un
+    # sillón gris oscuro): el color se mantiene dentro de lo que varía ahí
+    for c in (1, 2):
+        sd = np.sqrt(np.maximum(cv2.GaussianBlur(ref[..., c] ** 2 * known, (0, 0), sg) / wk - mu[c] ** 2, 1.0))
+        lim = TAME_K * sd + 3
+        dev = lab[..., c] - mu[c]
+        clamped = mu[c] + np.clip(dev, -lim, lim)
+        lab[..., c] = np.where(hb, clamped, lab[..., c])
+        lab[..., c] += (mu[c] - lab[..., c]) * t
+    return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)

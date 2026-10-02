@@ -24,6 +24,7 @@ PHASE_2: set[str] = set()
 # intensidades que se prueban sobre una cara hasta pasar la verificación;
 # 0 = cara original, solo escalada
 FACE_STEPS = (0.7, 0.5, 0.35, 0.2, 0.1, 0.0)
+RESIDUAL_PASSES = 2  # repasos finales de la preparación que aún asoma (Restaurar cuadro)
 MAX_WORK = 2000  # px del lado largo con que se trabaja
 MAX_OUT = 4000  # px del lado largo del resultado
 
@@ -257,6 +258,36 @@ def process(rgb: np.ndarray, settings: Settings, progress=None) -> Result:
     )
 
 
+def _mouth_flakes(img: np.ndarray, faces: list) -> tuple[np.ndarray, np.ndarray]:
+    """Motas de preparación (claras y sin color) sobre la boca y alrededor.
+    Si la boca está abierta, su interior (donde irían los dientes) no se toca."""
+    h, w = img.shape[:2]
+    lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB).astype(np.float32)
+    L = lab[..., 0]
+    C = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
+    found = np.zeros((h, w), bool)
+    for fc in faces:
+        pts = fc.landmarks
+        io = fc.interocular
+        zone = np.zeros((h, w), np.uint8)
+        cv2.fillConvexPoly(zone, cv2.convexHull(pts[48:60].astype(np.int32)), 1)
+        k = max(3, int(0.3 * io)) | 1
+        zone = cv2.dilate(zone, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))) > 0
+        if np.linalg.norm(pts[62] - pts[66]) > 0.08 * io:
+            inner = np.zeros((h, w), np.uint8)
+            cv2.fillConvexPoly(inner, cv2.convexHull(pts[60:68].astype(np.int32)), 1)
+            zone &= inner == 0
+        km = max(5, int(0.35 * io)) | 1
+        Lmed = cv2.medianBlur(L.astype(np.uint8), min(km, 255)).astype(np.float32)
+        cand = zone & (L - Lmed > 18) & (C < 34) & (L > 185)
+        cand = cv2.morphologyEx(cand.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+        cand = cv2.dilate(cand, np.ones((3, 3), np.uint8)) > 0
+        found |= cand & zone
+    if not found.any():
+        return img, found
+    return cv2.inpaint(img, found.astype(np.uint8) * 255, 3, cv2.INPAINT_TELEA), found
+
+
 def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Result:
     """Restaurar cuadro (ver painting.py): barniz y suciedad, craquelado,
     lagunas y zonas descoloridas. Sin reducir ruido, enfocar ni ampliar: la
@@ -309,8 +340,8 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
         work = cv2.inpaint(work, cracks, 3, cv2.INPAINT_TELEA)
 
     say(0.45, "Reintegrando lagunas")
-    losses = (np.maximum(painting.detect_losses(rgb, i, feat_u)[0], painting.detect_flakes(rgb, i, feat_u))
-              if settings.auto_damage else empty)
+    flakes = painting.detect_flakes(rgb, i, feat_u) if settings.auto_damage else empty
+    losses = np.maximum(painting.detect_losses(rgb, i, feat_u)[0], flakes) if settings.auto_damage else empty
     holes = ((losses > 0) | (user > 0)).astype(np.uint8)
     # referencia y último recurso para las caras: limpia y con los huecos
     # (ya sin ojos, nariz ni boca) cerrados a lo liso
@@ -325,6 +356,7 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
         # y boca nunca son hueco); sin él, a lo liso
         lama = inpaint.lama_available()
         plain, fill_info = inpaint.fill(work, holes, None if lama else face_u)
+        plain = painting.tame_fill(plain, work, holes * (face_u <= 0.05))
         if settings.auto_damage:
             # segunda pasada: lo que el relleno dejó a la vista entre tanto
             # desconchón (restos claros sueltos) se ve ahora aislado
@@ -334,6 +366,11 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
             if again.any():
                 plain = inpaint.fill(plain, again, None if lama else face_u)[0]
                 holes = ((holes > 0) | (again > 0)).astype(np.uint8)
+    # boca: los desconchones sobre los labios (ahí no entra el relleno de
+    # arriba) se cierran con el color del propio labio y la piel de al lado
+    if settings.auto_damage and faces:
+        plain, lips = _mouth_flakes(plain, faces)
+        holes = ((holes > 0) | lips).astype(np.uint8)
     work = plain
 
     # caras: lo que falta de un lado se toma del otro lado, sano, del propio
@@ -385,6 +422,29 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
             work[Y0:Y1, X0:X1] = np.clip(cur * (1 - m) + cand * m, 0, 255).astype(np.uint8)
             sym[Y0:Y1, X0:X1] &= fm_small < 0.5
         reports.append(FaceReport(n + 1, fc.rect, applied, chk, 1))
+
+    # repaso final: la preparación que aún asoma (restos entre desconchones,
+    # bordes que el relleno dejó claros, la que cae junto a nariz o boca) se
+    # vuelve a buscar sobre el resultado y se cierra con lo de alrededor. Solo
+    # en cuadros desconchados: en uno con grietas o alguna laguna suelta, un
+    # claro pintado no tiene por qué ser preparación
+    residual = np.zeros((h, w), bool)
+    if settings.auto_damage and flakes.any():
+        say(0.88, "Repasando lo que aún se ve")
+        eyes = painting.eye_mask(rgb.shape, faces)
+        for _ in range(RESIDUAL_PASSES):
+            rest = painting.residual_losses(work, i, eyes, face_u, feat_u) > 0
+            if rest.sum() < 20:
+                break
+            residual |= rest
+            on_face = rest & (face_u > 0.05)
+            if (rest & ~on_face).any():
+                work = inpaint.fill(work, (rest & ~on_face).astype(np.uint8), None)[0]
+            if on_face.any():
+                # sobre la cara solo se cierra desde el borde (sin IA)
+                rf = cv2.dilate(on_face.astype(np.uint8), np.ones((3, 3), np.uint8)) * 255
+                work = cv2.inpaint(work, rf, 3, cv2.INPAINT_TELEA)
+        holes = ((holes > 0) | residual).astype(np.uint8)
 
     uncolored = None
     if settings.colorize:

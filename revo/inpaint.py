@@ -27,7 +27,7 @@ SMALL = 60  # píxeles: por debajo, una mota
 LAMA = "lama_fp32.onnx"
 LAMA_MIN = 1500  # píxeles: por debajo, el relleno clásico basta
 BUDGET = 25_000  # píxeles del recorte reducido que procesa FSR (tiempo acotado)
-LAMA_TILE = 1024  # lado máximo de un grupo de daños rellenado en una sola pasada de LaMa
+LAMA_TILE = 384  # lado máximo de un grupo de daños rellenado en una sola pasada de LaMa
 _lama = None
 _lama_lock = threading.Lock()
 
