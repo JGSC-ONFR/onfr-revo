@@ -22,6 +22,8 @@ import numpy as np
 
 
 TEX_K = 6
+WEAVE_K = 3.0
+FLAKES_PER_MP = 350
 
 
 def _lab(rgb):
@@ -53,7 +55,7 @@ def clean_varnish(rgb: np.ndarray, intensity: float) -> tuple[np.ndarray, dict]:
     b2 = b + db * wl
     # suciedad: niveles (negro y blanco) con un recorte muy suave
     lo, hi = np.percentile(L, 0.5), np.percentile(L, 99.5)
-    t = 0.3 + 0.3 * intensity
+    t = 0.2 + 0.25 * intensity  # poco: no debe parecer recién pintado
     lo_t, hi_t = lo * (1 - t), hi + (250 - hi) * t
     L2 = np.clip((L - lo) * (hi_t - lo_t) / max(1.0, hi - lo) + lo_t, 0, 255)
     out = cv2.merge([np.asarray(c, np.float32) for c in (L2, np.clip(a2, 0, 255), np.clip(b2, 0, 255))]).astype(np.uint8)
@@ -105,7 +107,10 @@ def detect_cracks(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
     base = cv2.morphologyEx(L, cv2.MORPH_CLOSE, k).astype(np.float32)
     mu = cv2.blur(base, (15, 15))
     tex = np.sqrt(np.maximum(cv2.blur(base * base, (15, 15)) - mu * mu, 0))
-    thr = 14.0 * (1.25 - 0.5 * intensity)
+    # la trama del lienzo deja surcos finos por todo el cuadro: una grieta
+    # tiene que ser bastante más oscura que ese fondo de trama
+    weave = cv2.blur(bh, (21, 21))
+    thr = np.maximum(14.0, WEAVE_K * weave) * (1.25 - 0.5 * intensity)
     cand = ((bh > thr) & (tex < TEX_K)).astype(np.uint8)
     # solo lo fino: lo que sobrevive a una apertura de 4x4 es una mancha o un trazo ancho
     wide = cv2.morphologyEx(cand, cv2.MORPH_OPEN, np.ones((4, 4), np.uint8))
@@ -265,7 +270,18 @@ def revive_faded(rgb: np.ndarray, intensity: float, protect: np.ndarray | None =
             continue
         if x <= 1 or y <= 1 or x + ww >= sw - 1 or y + hh >= sh - 1:
             continue  # toca el borde: probablemente es así a propósito
-        keep[lab_i == i] = 1
+        comp = lab_i == i
+        # solo si es el MISMO color, apagado: un gato blanco o un cuello
+        # blanco sobre un vestido rojo no son rojo descolorido
+        ring = (cv2.dilate(comp.astype(np.uint8), np.ones((big, big), np.uint8)) > 0) & ~comp
+        ca, cb = a[comp].mean() - 128, b[comp].mean() - 128
+        ra, rb = a[ring].mean() - 128, b[ring].mean() - 128
+        if np.hypot(ca, cb) < 6:
+            continue  # casi sin color: no hay matiz que avivar
+        cosang = (ca * ra + cb * rb) / (np.hypot(ca, cb) * np.hypot(ra, rb) + 1e-6)
+        if cosang < np.cos(np.radians(25)):
+            continue
+        keep[comp] = 1
     if not keep.any():
         return rgb, 0.0
     # se aviva el color que aún queda (mismo matiz) hasta acercarlo al de
@@ -348,3 +364,57 @@ def refine_brush(rgb: np.ndarray, brush: np.ndarray, intensity: float) -> np.nda
     if m.sum() < 0.02 * b.sum():
         return brush  # nada destaca: se respeta lo que marcaste
     return (m > 0).astype(np.uint8) * 255
+
+
+# --------------------------------------------------------------- desconchados
+def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | None = None) -> np.ndarray:
+    """Desconchados: muchas islas de pintura caída que dejan ver la
+    preparación (crema o blanca, casi sin color), claramente más claras que
+    la pintura que las rodea. Primero se buscan las evidentes; con ellas se
+    aprende el color de la preparación de ESTE cuadro, y luego se buscan las
+    que caen sobre zonas claras (cara, brazos), donde se distinguen por ese
+    color y no tanto por la luz. Sobre ojos, nariz y boca solo cuenta lo que
+    tiene exactamente ese color."""
+    lab = _lab(rgb)
+    L = lab[..., 0]
+    Lf = L.astype(np.float32)
+    a = lab[..., 1].astype(np.float32) - 128
+    b = lab[..., 2].astype(np.float32) - 128
+    C = np.hypot(a, b)
+    h, w = L.shape
+    k = max(15, int(0.03 * max(h, w))) | 1
+    bg = cv2.medianBlur(L, min(k, 255)).astype(np.float32)
+    s = 1.0 - 0.4 * intensity
+    strong = (Lf - bg > 30 * s) & (C < 32) & (Lf > 170)
+    if feature_mask is not None:
+        strong &= feature_mask < 0.5
+    strong = cv2.morphologyEx(strong.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8)) > 0
+    # solo si el cuadro está de verdad desconchado: cientos de islas, y del
+    # color crema de una preparación (no los brillos blancos de la pintura)
+    n_isl = cv2.connectedComponents(strong.astype(np.uint8), connectivity=8)[0] - 1
+    if (n_isl < FLAKES_PER_MP * h * w / 1e6 or float(np.mean(C[strong] >= 8)) < 0.5
+            or float(np.mean(L[strong] >= 248)) > 0.25):
+        return np.zeros((h, w), np.uint8)
+    # color de la preparación y fondo sin ella (media de lo que no es desconchado)
+    g = np.array([np.median(Lf[strong]), np.median(a[strong]), np.median(b[strong])], np.float32)
+    keep = (~cv2.dilate(strong.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)).astype(np.float32)
+    sg = max(4.0, 0.012 * max(h, w))
+    bg2 = cv2.GaussianBlur(Lf * keep, (0, 0), sg) / (cv2.GaussianBlur(keep, (0, 0), sg) + 1e-3)
+    dist = np.sqrt((Lf - g[0]) ** 2 * 0.5 + (a - g[1]) ** 2 + (b - g[2]) ** 2)
+    by_color = (dist < 14 * (0.8 + 0.4 * intensity)) & (Lf - bg2 > 12 * s)
+    # los desconchados van en racimos: lejos de los evidentes no se busca
+    r = max(9, int(0.02 * max(h, w))) | 1
+    by_color &= cv2.dilate(strong.astype(np.uint8), np.ones((r, r), np.uint8)) > 0
+    if feature_mask is not None:
+        on_feat = feature_mask >= 0.5
+        by_color &= ~on_feat | ((dist < 11) & (Lf - bg2 > 20 * s))
+    # un blanco puro y saturado es un reflejo pintado, no la preparación
+    strong &= Lf < 248
+    m = (strong | by_color).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    # trocitos sueltos de 1-2 px son grano o brillo, no desconchados
+    n, lab_i, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    small = stats[:, cv2.CC_STAT_AREA] < 6
+    small[0] = False
+    m[small[lab_i]] = 0
+    return cv2.dilate(m, np.ones((3, 3), np.uint8)) * 255

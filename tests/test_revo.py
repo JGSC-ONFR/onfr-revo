@@ -173,6 +173,27 @@ def test_torn_portrait_rebuilt_from_its_own_paint():
     assert res.stats["mirrored"] > 300, res.stats["mirrored"]
 
 
+def test_flaking_painting_detected_but_clean_one_not():
+    """Cuadro con cientos de desconchados (la preparación crema asoma): se
+    encuentran casi todos; en el mismo cuadro sano, ninguno."""
+    from revo.painting import detect_flakes
+
+    clean = load("cuadro_original.png")
+    assert not detect_flakes(clean, 0.35).any()
+    rng = np.random.default_rng(5)
+    img, gt = clean.copy(), np.zeros(clean.shape[:2], np.uint8)
+    h, w = gt.shape
+    for _ in range(600):
+        cx, cy = int(rng.uniform(0.05, 0.95) * w), int(rng.uniform(0.05, 0.95) * h)
+        r = int(rng.integers(2, 7))
+        pts = np.array([[cx + rng.integers(-r, r + 1), cy + rng.integers(-r, r + 1)] for _ in range(5)], np.int32)
+        cv2.fillPoly(gt, [cv2.convexHull(pts)], 1)
+    img[gt > 0] = (232, 222, 200)
+    m = detect_flakes(img, 0.35) > 0
+    assert m[gt > 0].mean() > 0.6, m[gt > 0].mean()
+    assert (m & ~cv2.dilate(gt, np.ones((7, 7), np.uint8)).astype(bool)).mean() < 0.04
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

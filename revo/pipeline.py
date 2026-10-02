@@ -278,9 +278,13 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
         um = settings.user_mask
         if um.shape[:2] != (h, w):
             um = cv2.resize(um.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
-        # del trazo del pincel, solo lo que está dañado de verdad
-        user = painting.refine_brush(rgb, (um > 0).astype(np.uint8) * 255, i)
-    rough = painting.detect_losses(rgb, i)[0] if settings.auto_damage else empty
+        # del trazo del pincel, solo lo que está dañado de verdad (lo que
+        # REVO mismo reconoce como pintura caída se queda entero)
+        brush = (um > 0).astype(np.uint8) * 255
+        auto = np.maximum(painting.detect_losses(rgb, i)[0], painting.detect_flakes(rgb, i))
+        user = np.maximum(painting.refine_brush(rgb, brush, i), auto & brush)
+    rough = (np.maximum(painting.detect_losses(rgb, i)[0], painting.detect_flakes(rgb, i))
+             if settings.auto_damage else empty)
     rough_holes = cv2.dilate(((rough > 0) | (user > 0)).astype(np.uint8), np.ones((5, 5), np.uint8))
 
     say(0.15, "Quitando barniz amarillento y suciedad")
@@ -305,8 +309,15 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
         work = cv2.inpaint(work, cracks, 3, cv2.INPAINT_TELEA)
 
     say(0.45, "Reintegrando lagunas")
-    losses = painting.detect_losses(rgb, i, feat_u)[0] if settings.auto_damage else empty
+    losses = (np.maximum(painting.detect_losses(rgb, i, feat_u)[0], painting.detect_flakes(rgb, i, feat_u))
+              if settings.auto_damage else empty)
     holes = ((losses > 0) | (user > 0)).astype(np.uint8)
+    # referencia y último recurso para las caras: limpia y con los huecos
+    # (ya sin ojos, nariz ni boca) cerrados a lo liso
+    if holes.any():
+        quick = cv2.inpaint(clean, cv2.dilate(holes, np.ones((3, 3), np.uint8)), 3, cv2.INPAINT_TELEA)
+    else:
+        quick = clean
     fill_info = {"on_faces": 0, "engine": "FSR"}
     plain = work
     if holes.any():

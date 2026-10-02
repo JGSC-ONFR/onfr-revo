@@ -22,7 +22,7 @@ from revo import painting, restore
 from revo.analysis import analyze
 from revo.faces import FaceGuard, face_masks
 from revo.inpaint import lama_available, preload
-from revo.pipeline import MAX_WORK, intervention_map, summary_lines
+from revo.pipeline import MAX_WORK, _detect_small, intervention_map, summary_lines
 
 MODE_BUTTONS = [
     ("mejorar", "Mejorar"),
@@ -304,7 +304,7 @@ def _suggestions(img, mode, intensity, monochrome):
     layer = np.zeros((*img.shape[:2], 4), np.uint8)
     if not (monochrome or mode == "restaurar_cuadro"):
         return layer
-    faces = FaceGuard.get().detect(img, embed=False)
+    faces = _detect_small(FaceGuard.get(), img)
     fu = np.zeros(img.shape[:2], np.float32)
     ft = np.zeros(img.shape[:2], np.float32)
     for f in faces:
@@ -312,6 +312,9 @@ def _suggestions(img, mode, intensity, monochrome):
         fu, ft = np.maximum(fu, m1), np.maximum(ft, m2)
     if mode == "restaurar_cuadro":  # lagunas: pintura caída
         dmg, regions = painting.detect_losses(img, LEVELS[intensity], ft)
+        flakes = painting.detect_flakes(img, LEVELS[intensity], ft)
+        if flakes.any():
+            dmg, regions = np.maximum(dmg, flakes), regions + 1
     else:
         dmg, info = restore.detect_damage(img, True, fu, ft, LEVELS[intensity])
         regions = info["regions"]
