@@ -69,6 +69,10 @@ NET = 0
 STRAIGHT = 0.5
 SOLID = 0.55  # zona clara maciza = objeto pintado, no racimo de desconchones
 TAME_K = 1.0  # cuántas desviaciones por encima de la luz de alrededor puede quedar un relleno
+HARMONY_KEEP = 0.6  # parte del borde que debe ser de un solo tono para igualar un hueco grande
+DARK_BG = 110.0  # fondo oscuro: ahí una mota clara junto a un objeto blanco es desconchón
+DULL_C = 8.0  # cuánto color pierde la piel donde asoma la preparación
+PALE_WIDE = 0.045  # entorno amplio para manchas pálidas grandes
 PALE_L, PALE_C = 8.0, 10.0  # mancha más clara y más apagada que su entorno
 BODY = 0.006  # fracción (lado largo²) a partir de la cual una zona blanca maciza es un cuerpo pintado
 GROW = 3  # píxeles que se amplía cada desconchón hasta su borde real
@@ -505,6 +509,9 @@ def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
     # un blanco puro y saturado es un reflejo pintado, no la preparación
     strong &= Lf < 248
     whites = _painted_whites(Lf, C, a, max(h, w))
+    # el cerco que protege un objeto blanco no protege las motas que caen
+    # sobre pintura oscura justo al lado (sillón junto al gato blanco)
+    whites &= ~(strong & (bg < DARK_BG))
     m = (strong | by_color) & ~whites
     # el borde de cada desconchón: la preparación sigue unos píxeles más
     # allá de lo que salta a la vista (si no, queda un cerco claro)
@@ -526,6 +533,16 @@ def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
     Lmed = cv2.medianBlur(L, min(km, 255)).astype(np.float32)
     Cmed = cv2.medianBlur(np.clip(C, 0, 255).astype(np.uint8), min(km, 255)).astype(np.float32)
     pale = (Lf - Lmed > PALE_L * s) & (Cmed - C > PALE_C * s) & (C < 30) & (Lf > 150)
+    # una mancha grande (un codo entero desconchado) llena el entorno pequeño:
+    # se compara también con uno más amplio
+    kw = max(15, int(PALE_WIDE * max(h, w))) | 1
+    Lw = cv2.medianBlur(L, min(kw, 255)).astype(np.float32)
+    Cw = cv2.medianBlur(np.clip(C, 0, 255).astype(np.uint8), min(kw, 255)).astype(np.float32)
+    near_m = cv2.dilate(m, np.ones((r, r), np.uint8)) > 0
+    pale |= (Lf - Lw > PALE_L * s) & (Cw - C > PALE_C * s) & (C < 30) & (Lf > 150) & near_m
+    # sobre piel muy clara la preparación no es más clara, solo más apagada y
+    # de su color exacto
+    pale |= (Cw - C > DULL_C * s) & (dist < 13) & (Lf > Lw - 6) & (Lf > 150) & near_m
     # sobre piel clara casi no cambia el color, pero sí la luz: junto a otros
     # desconchones, lo bastante más claro que su entorno y del color de la
     # preparación también lo es
@@ -554,6 +571,56 @@ def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
         dense &= feature_mask < 0.5
     m |= dense.astype(np.uint8)
     return cv2.dilate(m, np.ones((3, 3), np.uint8)) * 255
+
+
+def harmonize_fill(filled: np.ndarray, before: np.ndarray, holes: np.ndarray, min_area: int = 300) -> np.ndarray:
+    """En un hueco grande la IA de relleno a veces se inventa una mancha
+    turbia (un borrón marrón claro en un sillón oscuro). Su luz y su color de
+    fondo se sustituyen por los del borde sano que lo rodea (sin lo que salta
+    de él: un gato blanco al lado no cuenta) y se conserva, suavizada, la
+    textura del relleno. Si el borde no es de un solo tono (el hueco cruza
+    dos objetos), se deja como está."""
+    hb = holes > 0
+    if not hb.any():
+        return filled
+    lab = cv2.cvtColor(filled, cv2.COLOR_RGB2LAB).astype(np.float32)
+    ref = cv2.cvtColor(before, cv2.COLOR_RGB2LAB).astype(np.float32)
+    out = lab.copy()
+    n, li, st, _ = cv2.connectedComponentsWithStats(hb.astype(np.uint8), connectivity=8)
+    H, W = hb.shape
+    for j in range(1, n):
+        if st[j, cv2.CC_STAT_AREA] < min_area:
+            continue
+        x0, y0, w, h = st[j, :4]
+        p = 16
+        X0, Y0, X1, Y1 = max(0, x0 - p), max(0, y0 - p), min(W, x0 + w + p), min(H, y0 + h + p)
+        comp = (li[Y0:Y1, X0:X1] == j).astype(np.uint8)
+        ring = ((cv2.dilate(comp, np.ones((13, 13), np.uint8)) > 0)
+                & ~(cv2.dilate(comp, np.ones((3, 3), np.uint8)) > 0) & ~hb[Y0:Y1, X0:X1])
+        r = ref[Y0:Y1, X0:X1]
+        if ring.sum() < 30:
+            continue
+        # (la trama del lienzo no cuenta: se mira la luz suavizada)
+        rl = cv2.GaussianBlur(r[..., 0], (0, 0), 2)
+        med = np.median(rl[ring])
+        keep = ring & (rl < med + 12)
+        if keep.sum() < HARMONY_KEEP * ring.sum():
+            continue
+        bgr = cv2.cvtColor(np.clip(r, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+        base = cv2.inpaint(bgr, (~keep).astype(np.uint8) * 255, 9, cv2.INPAINT_TELEA)
+        base = cv2.GaussianBlur(cv2.cvtColor(base, cv2.COLOR_BGR2LAB).astype(np.float32), (0, 0), 6)
+        c = lab[Y0:Y1, X0:X1]
+        hf = c - cv2.GaussianBlur(c, (0, 0), 6)
+        hf[..., 0] = np.clip(hf[..., 0] * 0.7, -8, 8)
+        hf[..., 1:] *= 0.4
+        # junto a lo claro que se apartó (el cuello blanco al lado del
+        # vestido) el relleno de la IA se respeta: ahí el tono es otro objeto
+        near = cv2.inpaint(bgr, (~ring).astype(np.uint8) * 255, 9, cv2.INPAINT_TELEA)
+        near_l = cv2.GaussianBlur(cv2.cvtColor(near, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32), (0, 0), 3)
+        trust = np.clip(1 - (near_l - base[..., 0] - 6) / 10, 0, 1)
+        a = (cv2.GaussianBlur(comp.astype(np.float32), (0, 0), 2) * comp * trust)[..., None]
+        out[Y0:Y1, X0:X1] = c * (1 - a) + (base + hf) * a
+    return cv2.cvtColor(np.clip(out, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
 
 
 def tame_fill(filled: np.ndarray, before: np.ndarray, holes: np.ndarray) -> np.ndarray:

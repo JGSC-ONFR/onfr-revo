@@ -160,10 +160,10 @@ def fill(rgb: np.ndarray, mask: np.ndarray, face_mask: np.ndarray | None = None)
         box = [max(0, x - pad), max(0, y - pad), min(w, x + ww + pad), min(h, y + hh + pad)]
         if info["engine"] == "LaMa" and rest.sum() >= LAMA_MIN:
             big_rest[y:y + hh, x:x + ww] |= rest
-            big_boxes.append(box)
+            big_boxes.append(box + [i])
         else:
             mid_rest[y:y + hh, x:x + ww] |= rest
-            mid_boxes.append(box)
+            mid_boxes.append(box + [i])
 
     # la cara se trata como hueco también, para no copiar textura de la cara
     # hacia fuera ni al revés
@@ -172,8 +172,13 @@ def fill(rgb: np.ndarray, mask: np.ndarray, face_mask: np.ndarray | None = None)
         (big_rest, big_boxes, _lama_fill, LAMA_TILE),
         (mid_rest, mid_boxes, _fsr, 400),
     ):
-        for x0, y0, x1, y1 in _clusters(boxes, limit):
-            sel = rest_mask[y0:y1, x0:x1]
+        for x0, y0, x1, y1 in _clusters([b[:4] for b in boxes], limit):
+            # cada daño se escribe solo desde el recorte que lo contiene entero
+            # (con su margen): si dos recortes se pisan, el segundo no corta
+            # por la mitad lo que rellenó el primero y no queda costura
+            ids = [b[4] for b in boxes if b[0] >= x0 and b[1] >= y0 and b[2] <= x1 and b[3] <= y1]
+            boxes = [b for b in boxes if b[4] not in ids]
+            sel = rest_mask[y0:y1, x0:x1] & np.isin(lab[y0:y1, x0:x1], ids)
             if not sel.any():
                 continue
             # todo el daño del recorte cuenta como hueco (también las motas):

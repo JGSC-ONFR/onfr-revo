@@ -384,7 +384,8 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
         # y boca nunca son hueco); sin él, a lo liso
         lama = inpaint.lama_available()
         plain, fill_info = inpaint.fill(work, holes, None if lama else face_u)
-        plain = painting.tame_fill(plain, work, holes * (face_u <= 0.05))
+        out_face = holes * (face_u <= 0.05)
+        plain = painting.tame_fill(painting.harmonize_fill(plain, work, out_face), work, out_face)
         if settings.auto_damage:
             # segunda pasada: lo que el relleno dejó a la vista entre tanto
             # desconchón (restos claros sueltos) se ve ahora aislado

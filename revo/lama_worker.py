@@ -21,6 +21,9 @@ def run(sess, crop: np.ndarray, hole: np.ndarray) -> np.ndarray:
     img = cv2.resize(crop, (512, 512), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
     m = (cv2.resize(hole.astype(np.uint8), (512, 512), interpolation=cv2.INTER_NEAREST) > 0).astype(np.float32)
     m = cv2.dilate(m, np.ones((3, 3), np.uint8))
+    # el hueco va en negro: si el modelo ve lo que hay debajo (la preparación
+    # clara) lo imita y el relleno sale claro y turbio
+    img *= 1.0 - m[..., None]
     feed = {}
     for inp in sess.get_inputs():
         if "mask" in inp.name.lower() or (inp.shape and inp.shape[1] == 1):
