@@ -73,12 +73,24 @@ def check_face(
     ignore_mask: np.ndarray | None = None,
     id_limit: float = MIN_IDENTITY,
     lazy: bool = False,
+    skip_hidden: bool = False,
 ) -> FaceCheck:
     """candidate y reference a la resolución original. Con `lazy`, la
     identidad (la prueba más lenta) se omite si geometría o estructura ya han
     fallado: el intento se descarta igualmente."""
     lm = guard.landmarks(candidate, face.rect)
-    lm_dev = float(np.linalg.norm(lm - face.landmarks, axis=1).mean() / face.interocular)
+    dev = np.linalg.norm(lm - face.landmarks, axis=1)
+    if skip_hidden and ignore_mask is not None:
+        # puntos que caían en la pérdida: en la referencia no eran fiables
+        h, w = ignore_mask.shape[:2]
+        p = np.clip(face.landmarks.round().astype(int), 0, [w - 1, h - 1])
+        seen = ignore_mask[p[:, 1], p[:, 0]] == 0
+        if seen.sum() >= 20:
+            dev = dev[seen]
+        # en caras pequeñas (cuadros de pocos píxeles) los puntos bailan algo
+        # menos de un píxel sin que nada haya cambiado
+        dev = np.maximum(dev - 0.75, 0)
+    lm_dev = float(dev.mean() / face.interocular)
 
     x0, y0, x1, y1 = face.rect
     pad = int(0.4 * (x1 - x0))

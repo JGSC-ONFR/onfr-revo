@@ -21,6 +21,9 @@ import cv2
 import numpy as np
 
 
+TEX_K = 6
+
+
 def _lab(rgb):
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
 
@@ -58,6 +61,36 @@ def clean_varnish(rgb: np.ndarray, intensity: float) -> tuple[np.ndarray, dict]:
 
 
 # --------------------------------------------------------------- grietas
+NET = 0
+
+
+STRAIGHT = 0.5
+
+
+def _straight(comp: np.ndarray) -> float:
+    """Parte de la línea que es recta y larga. Las grietas zigzaguean; un
+    trazo recto largo (jarcias, cables, marcos, contornos) es del pintor."""
+    total = int(comp.sum())
+    if total < 25:
+        return 0.0
+    segs = cv2.HoughLinesP(comp * 255, 1, np.pi / 90, 15, minLineLength=25, maxLineGap=2)
+    if segs is None:
+        return 0.0
+    on = np.zeros_like(comp)
+    for x0, y0, x1, y1 in segs[:, 0]:
+        cv2.line(on, (int(x0), int(y0)), (int(x1), int(y1)), 1, 3)
+    return float((on & comp).sum()) / total
+
+
+def _cells(comp: np.ndarray) -> int:
+    """Celdas cerradas que forma una red de líneas. El craquelado divide la
+    pintura en «islas»; el pelo, las vetas o los trazos finos no se cierran."""
+    cnt, hier = cv2.findContours(comp, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hier is None:
+        return 0
+    return sum(1 for c, hc in zip(cnt, hier[0]) if hc[3] >= 0 and cv2.contourArea(c) >= 12)
+
+
 def detect_cracks(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | None = None) -> np.ndarray:
     """Craquelado: líneas oscuras finas (1-3 px) y alargadas. Los trazos que
     el pintor dibujó suelen ser más anchos o seguir bordes de color; aquí
@@ -66,9 +99,14 @@ def detect_cracks(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
     h, w = L.shape
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     bh = cv2.morphologyEx(L, cv2.MORPH_BLACKHAT, k).astype(np.float32)
-    mad = float(np.median(np.abs(bh - np.median(bh)))) + 1e-3
-    thr = max(14.0, 6 * mad) * (1.25 - 0.5 * intensity)
-    cand = (bh > thr).astype(np.uint8)
+    # textura de la pintura sin las líneas finas (la mediana las borra): una
+    # grieta solo se reconoce si destaca mucho sobre la textura de alrededor.
+    # Pelo, encajes, vetas o pinceladas finas forman parte de la obra
+    base = cv2.morphologyEx(L, cv2.MORPH_CLOSE, k).astype(np.float32)
+    mu = cv2.blur(base, (15, 15))
+    tex = np.sqrt(np.maximum(cv2.blur(base * base, (15, 15)) - mu * mu, 0))
+    thr = 14.0 * (1.25 - 0.5 * intensity)
+    cand = ((bh > thr) & (tex < TEX_K)).astype(np.uint8)
     # solo lo fino: lo que sobrevive a una apertura de 4x4 es una mancha o un trazo ancho
     wide = cv2.morphologyEx(cand, cv2.MORPH_OPEN, np.ones((4, 4), np.uint8))
     thin = cand & ~wide
@@ -82,7 +120,12 @@ def detect_cracks(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
         # alargada: poca área para su caja (una línea, no una mota)
         if area > 0.6 * ww * hh and min(ww, hh) > 4:
             continue
-        out[y:y + hh, x:x + ww][lab[y:y + hh, x:x + ww] == i] = 255
+        comp = (lab[y:y + hh, x:x + ww] == i).astype(np.uint8)
+        if NET and _cells(comp) < NET:
+            continue
+        if STRAIGHT and _straight(comp) > STRAIGHT:
+            continue  # trazo recto (jarcias, cables, contornos): lo pintó alguien
+        out[y:y + hh, x:x + ww][comp > 0] = 255
     if feature_mask is not None:
         out[feature_mask > 0.5] = 0
     return cv2.dilate(out, np.ones((3, 3), np.uint8))
@@ -123,12 +166,72 @@ def detect_losses(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
             continue
         if float(np.median(bb[ys, xs][comp])) > warm - (6 - 2 * intensity):
             continue  # tan amarillento como los blancos pintados: es pintura
-        if feature_mask is not None and (comp & (feature_mask[ys, xs] > 0.5)).any():
-            continue
+        if float(np.mean(L[ys, xs][comp] >= 250)) > 0.5:
+            continue  # blanco puro, saturado: un reflejo pintado, no la preparación
+        if _halo(L[ys, xs], comp) > HALO:
+            continue  # brillo pintado: se apaga poco a poco hacia fuera
+        if feature_mask is not None:
+            # sobre un rasgo solo cuenta si casi toda la laguna está fuera de
+            # él (una rotura que cruza la cara); un brillo del ojo, no
+            inside = (comp & (feature_mask[ys, xs] > 0.5)).sum()
+            if inside and inside > 0.4 * area:
+                continue
         grown = cv2.dilate(comp.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
         out[ys, xs][grown] = 255
         regions += 1
-    return out, regions
+    strips, n_strips = _strips(L, chroma, intensity, feature_mask)
+    return np.maximum(out, strips), regions + n_strips
+
+
+HALO = 12.0
+
+
+def _halo(L, comp):
+    """Cuánto más claro es el borde inmediato que lo de un poco más allá. Un
+    brillo pintado (reflejo de una cuchara, de un ojo) se va apagando hacia
+    fuera; una laguna corta en seco con la pintura de alrededor."""
+    c = comp.astype(np.uint8)
+    d3 = cv2.dilate(c, np.ones((5, 5), np.uint8)) > 0
+    d7 = cv2.dilate(c, np.ones((9, 9), np.uint8)) > 0
+    d13 = cv2.dilate(c, np.ones((15, 15), np.uint8)) > 0
+    inner, outer = d3 & ~comp, d13 & ~d7
+    if not inner.any() or not outer.any():
+        return 0.0
+    return float(np.median(L[inner]) - np.median(L[outer]))
+
+
+def _strips(L, chroma, intensity, feature_mask):
+    """Roturas y pintura levantada en franja: una banda larga y estrecha,
+    clara y sin color, con el borde oscuro (la sombra del levantamiento).
+    Aquí no hace falta que sea más fría que los blancos: la forma la delata."""
+    h, w = L.shape
+    cand = ((L >= 185) & (chroma < 22)).astype(np.uint8)
+    cand = cv2.morphologyEx(cand, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab_i, stats, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
+    out = np.zeros((h, w), np.uint8)
+    count = 0
+    for i in range(1, n):
+        x, y, ww, hh, area = stats[i]
+        if area < 0.002 * h * w or area > 0.08 * h * w:
+            continue
+        p = 10
+        ys, xs = slice(max(0, y - p), min(h, y + hh + p)), slice(max(0, x - p), min(w, x + ww + p))
+        comp = lab_i[ys, xs] == i
+        thick = 2 * float(cv2.distanceTransform(comp.astype(np.uint8), cv2.DIST_L2, 5).max())
+        length = area / max(1.0, thick)
+        if thick > 0.03 * max(h, w) + 4 or length < 12 * thick:
+            continue
+        ring = (cv2.dilate(comp.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0) & ~comp
+        if float(L[ys, xs][comp].mean()) - float(np.median(L[ys, xs][ring])) < 60 - 20 * intensity:
+            continue
+        if feature_mask is not None:
+            inside = (comp & (feature_mask[ys, xs] > 0.5)).sum()
+            if inside > 0.4 * area:
+                continue
+        grown = cv2.dilate(comp.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0  # con su sombra
+        out[ys, xs][grown] = 255
+        count += 1
+    return out, count
 
 
 # --------------------------------------------------------------- color perdido
@@ -179,3 +282,69 @@ def revive_faded(rgb: np.ndarray, intensity: float, protect: np.ndarray | None =
     full[..., 2] = np.clip(128 + (full[..., 2] - 128) * k, 0, 255)
     out = cv2.cvtColor(full.astype(np.uint8), cv2.COLOR_LAB2RGB)
     return out, float(keep.mean())
+
+
+# --------------------------------------------------------------- pincel
+def _local_stats(lab: np.ndarray, valid: np.ndarray, sigma: float):
+    """Color medio y dispersión de la pintura sana alrededor de cada punto."""
+    v = valid.astype(np.float32)
+    wv = cv2.GaussianBlur(v, (0, 0), sigma) + 1e-4
+    mean = np.stack([cv2.GaussianBlur(lab[..., c] * v, (0, 0), sigma) for c in range(3)], -1) / wv[..., None]
+    sq = np.stack([cv2.GaussianBlur(lab[..., c] ** 2 * v, (0, 0), sigma) for c in range(3)], -1) / wv[..., None]
+    std = np.sqrt(np.maximum(sq - mean ** 2, 0).sum(-1))
+    return mean, std, wv
+
+
+def refine_brush(rgb: np.ndarray, brush: np.ndarray, intensity: float) -> np.ndarray:
+    """De lo pintado con el pincel, solo lo que de verdad está dañado: la
+    preparación o el lienzo que asoma y los bordes de la rotura, que se
+    apartan claramente del color de la pintura sana de alrededor. La pintura
+    buena que el pincel haya cubierto no se toca."""
+    b = brush > 0
+    if not b.any():
+        return brush
+    lab = _lab(rgb).astype(np.float32)
+    # grosor típico del trazo del pincel → escala a la que mirar alrededor
+    dist = cv2.distanceTransform(b.astype(np.uint8), cv2.DIST_L2, 5)
+    sigma = max(3.0, 1.0 * float(np.percentile(dist[b], 90)))
+    valid = ~b
+    dmg = b.copy()
+    h, w = b.shape
+    # un píxel del pincel está sano si alrededor hay pintura sana de su mismo
+    # color (cualquiera de los colores de alrededor, no la media: el pincel
+    # puede cruzar el borde entre la cara y la ropa)
+    for radii in ((sigma + 1, 1.4 * sigma + 2, 1.8 * sigma + 3),):
+        best = np.full((h, w), np.inf, np.float32)
+        for r in radii:
+            for t in np.linspace(0, 2 * np.pi, 16, endpoint=False):
+                dx, dy = int(round(r * np.cos(t))), int(round(r * np.sin(t)))
+                M = np.float32([[1, 0, dx], [0, 1, dy]])
+                sh = cv2.warpAffine(lab, M, (w, h), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_REPLICATE)
+                sv = cv2.warpAffine(valid.astype(np.uint8), M, (w, h), flags=cv2.INTER_NEAREST, borderValue=0) > 0
+                d = np.sqrt(((lab - sh) ** 2).sum(-1))
+                d[~sv] = np.inf
+                np.minimum(best, d, out=best)
+        thr = 16.0 * (1.2 - 0.4 * intensity)
+        dmg = b & (best > thr)
+        valid = ~b | ~cv2.dilate(dmg.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+    # lo que tiene el mismo color que el daño encontrado y lo toca también es
+    # daño (p. ej. la rotura al pasar junto a un cuello blanco)
+    if dmg.sum() >= 20:
+        k = int(min(3, dmg.sum() // 20))
+        pts = lab[dmg].astype(np.float32)
+        _, _, centers = cv2.kmeans(pts, k, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0),
+                                   2, cv2.KMEANS_PP_CENTERS)
+        near = np.min(np.stack([np.sqrt(((lab - c) ** 2).sum(-1)) for c in centers]), 0)
+        like = (b & (near < 10.0 * (1.2 - 0.4 * intensity))) | dmg
+        grown = dmg.astype(np.uint8)
+        for _ in range(64):
+            nxt = cv2.dilate(grown, np.ones((3, 3), np.uint8)) & like.astype(np.uint8)
+            if (nxt == grown).all():
+                break
+            grown = nxt
+        dmg = grown > 0
+    m = cv2.morphologyEx(dmg.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    m = cv2.dilate(m, np.ones((3, 3), np.uint8)) & b.astype(np.uint8)
+    if m.sum() < 0.02 * b.sum():
+        return brush  # nada destaca: se respeta lo que marcaste
+    return (m > 0).astype(np.uint8) * 255

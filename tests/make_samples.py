@@ -104,6 +104,26 @@ def damaged_painting(rgb):
     return np.clip(img, 0, 255).astype(np.uint8), cm
 
 
+def torn_portrait(rgb):
+    """Retrato pequeño (300 px) con la pintura levantada en una franja que
+    cruza ojo, nariz, boca y ropa, y el trazo de pincel (generoso) con que
+    se marcaría."""
+    r = np.random.default_rng(1)
+    oil = cv2.resize(painting(rgb[0:400, 40:440]), (300, 300), interpolation=cv2.INTER_AREA)
+    pts = [(95, 60), (120, 95), (135, 118), (148, 140), (160, 160), (170, 185), (190, 230), (215, 295)]
+    tear = np.zeros((300, 300), np.uint8)
+    for a, b in zip(pts, pts[1:]):
+        cv2.line(tear, a, b, 255, int(r.integers(5, 9)))
+    tear = cv2.morphologyEx(tear, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    shadow = cv2.dilate(tear, np.ones((5, 5), np.uint8)) & ~tear
+    img = oil.astype(np.float32)
+    img[shadow > 0] *= 0.55
+    ground = np.array([226, 232, 238], np.float32) + r.normal(0, 4, (300, 300, 1))
+    img[tear > 0] = ground[tear > 0]
+    brush = cv2.dilate(tear, np.ones((15, 15), np.uint8))
+    return oil, np.clip(img, 0, 255).astype(np.uint8), tear, brush
+
+
 def save(name, rgb):
     cv2.imwrite(os.path.join(OUT, name), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
     print("->", name, rgb.shape)
@@ -122,3 +142,8 @@ save("cuadro_deteriorado.png", damaged_painting(cuadro)[0])
 bodegon = painting(data.coffee())
 save("bodegon_original.png", bodegon)
 save("bodegon_deteriorado.png", damaged_painting(bodegon)[0])
+oil, torn, tear, brush = torn_portrait(astro)
+save("retrato_original.png", oil)
+save("retrato_roto.png", torn)
+cv2.imwrite(os.path.join(OUT, "retrato_rotura.png"), tear)
+cv2.imwrite(os.path.join(OUT, "retrato_pincel.png"), brush)

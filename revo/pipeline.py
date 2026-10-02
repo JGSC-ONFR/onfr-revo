@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from . import colorize as colorizer
-from . import enhance, inpaint, painting, restore
+from . import enhance, inpaint, painting, restore, symmetry
 from .analysis import Analysis, analyze, estimate_noise
 from .faces import Face, FaceGuard, face_masks
 from .fidelity import FaceCheck, check_face, identity_limit
@@ -94,6 +94,22 @@ def _crop_box(face: Face, shape, pad=0.6):
 def _shift(face: Face, dx, dy) -> Face:
     x0, y0, x1, y1 = face.rect
     return Face((x0 - dx, y0 - dy, x1 - dx, y1 - dy), face.landmarks - [dx, dy], face.embedding)
+
+
+def _detect_small(guard: FaceGuard, rgb: np.ndarray) -> list[Face]:
+    """Caras de un cuadro pequeño: se buscan sobre una copia ampliada (el
+    detector no ve caras de menos de ~80 px) y se devuelven a su tamaño."""
+    h, w = rgb.shape[:2]
+    f = 1.0 if max(h, w) >= 700 else 700 / max(h, w)
+    if f == 1.0:
+        return guard.detect(rgb, embed=False)
+    big = cv2.resize(rgb, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
+    out = []
+    for fc in guard.detect(big, embed=False):
+        x0, y0, x1, y1 = fc.rect
+        r = tuple(int(round(v / f)) for v in (x0, y0, x1, y1))
+        out.append(Face(r, fc.landmarks / f))
+    return out
 
 
 def process(rgb: np.ndarray, settings: Settings, progress=None) -> Result:
@@ -255,65 +271,95 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
 
     say(0.05, "Analizando el cuadro")
     ana = analyze(rgb)
-    say(0.12, "Buscando rostros")
+    say(0.1, "Localizando los daños")
+    empty = np.zeros((h, w), np.uint8)
+    user = empty
+    if settings.user_mask is not None and settings.user_mask.any():
+        um = settings.user_mask
+        if um.shape[:2] != (h, w):
+            um = cv2.resize(um.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+        # del trazo del pincel, solo lo que está dañado de verdad
+        user = painting.refine_brush(rgb, (um > 0).astype(np.uint8) * 255, i)
+    rough = painting.detect_losses(rgb, i)[0] if settings.auto_damage else empty
+    rough_holes = cv2.dilate(((rough > 0) | (user > 0)).astype(np.uint8), np.ones((5, 5), np.uint8))
+
+    say(0.15, "Quitando barniz amarillento y suciedad")
+    clean, varnish = painting.clean_varnish(rgb, i)
+    # versión con los huecos cerrados a lo liso: con ella se encuentran las
+    # caras aunque la rotura las cruce, y es la referencia de sus rasgos
+    quick = cv2.inpaint(clean, rough_holes, 3, cv2.INPAINT_TELEA) if rough_holes.any() else clean
+
+    say(0.2, "Buscando rostros")
     guard = FaceGuard.get()
-    faces = guard.detect(rgb, embed=False)
+    faces = _detect_small(guard, quick)
     face_u = np.zeros((h, w), np.float32)
     feat_u = np.zeros((h, w), np.float32)
     for fc in faces:
         fm, ft = face_masks(rgb.shape, fc)
         face_u, feat_u = np.maximum(face_u, fm), np.maximum(feat_u, ft)
 
-    say(0.2, "Quitando barniz amarillento y suciedad")
-    clean, varnish = painting.clean_varnish(rgb, i)
+    say(0.3, "Cerrando grietas")
     work = clean
-
-    say(0.35, "Cerrando grietas")
     cracks = painting.detect_cracks(work, i, feat_u)
     if cracks.any():
         work = cv2.inpaint(work, cracks, 3, cv2.INPAINT_TELEA)
 
-    say(0.5, "Reintegrando lagunas")
-    empty = np.zeros((h, w), np.uint8)
-    losses, user = empty, empty
-    if settings.auto_damage:
-        losses, _ = painting.detect_losses(rgb, i, feat_u)
-    if settings.user_mask is not None and settings.user_mask.any():
-        um = settings.user_mask
-        if um.shape[:2] != (h, w):
-            um = cv2.resize(um.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
-        user = (um > 0).astype(np.uint8) * 255
+    say(0.45, "Reintegrando lagunas")
+    losses = painting.detect_losses(rgb, i, feat_u)[0] if settings.auto_damage else empty
     holes = ((losses > 0) | (user > 0)).astype(np.uint8)
     fill_info = {"on_faces": 0, "engine": "FSR"}
+    plain = work
     if holes.any():
-        work, fill_info = inpaint.fill(work, holes, face_u)
+        plain, fill_info = inpaint.fill(work, holes, face_u)
+    work = plain
+
+    # caras: lo que falta de un lado se toma del otro lado, sano, del propio
+    # cuadro (reflejado, alineado con sus puntos y con la luz del sitio)
+    sym = np.zeros((h, w), bool)
+    if holes.any() and faces:
+        say(0.55, "Reconstruyendo la cara a partir de su lado sano")
+        hole_d = cv2.dilate(holes, np.ones((3, 3), np.uint8))
+        for fc in faces:
+            fm, _ = face_masks(rgb.shape, fc)
+            work, done = symmetry.mirror_fill(work, hole_d, fm, fc.landmarks, fc.interocular)
+            sym |= done
 
     say(0.7, "Recuperando el color perdido")
     work, faded = painting.revive_faded(work, i, feat_u)
+    plain_f = painting.revive_faded(plain, i, feat_u)[0] if sym.any() else work
 
-    # rostros: si algo de lo anterior hubiera movido un rasgo, la cara vuelve
-    # a la versión solo limpiada de barniz
+    # rostros: si algo de lo anterior hubiera movido un rasgo, se deshace:
+    # primero la reconstrucción por simetría, y si aun así no cuadra, la cara
+    # vuelve a la versión solo limpiada de barniz
     reports: list[FaceReport] = []
     ignore = cv2.dilate(((holes > 0) | (cracks > 0)).astype(np.uint8) * 255, np.ones((5, 5), np.uint8))
     for n, fc in enumerate(faces):
         say(0.8, f"Verificando rostro {n + 1}")
         X0, Y0, X1, Y1 = _crop_box(fc, rgb.shape)
-        ref_img = np.ascontiguousarray(clean[Y0:Y1, X0:X1])
+        ref_img = np.ascontiguousarray(quick[Y0:Y1, X0:X1])
         fl = _shift(fc, X0, Y0)
         fm_small, _ = face_masks(ref_img.shape, fl)
-        ref = guard.describe(ref_img, Face(fl.rect, fl.landmarks.copy()))
-        id_limit = identity_limit(guard, ref, ref_img, ana.noise)
-        cand = np.ascontiguousarray(work[Y0:Y1, X0:X1])
-        chk = check_face(guard, ref, cand, ref_img, fm_small, ignore[Y0:Y1, X0:X1], id_limit)
+        # aquí solo cuenta la forma (puntos y estructura): sin vector de identidad
+        ref = Face(fl.rect, guard.landmarks(ref_img, fl.rect))
+        id_limit = 0.0
         applied = 1.0
-        # los rasgos nunca se tocan aquí. Las grietas de la referencia
-        # confunden al vector de identidad (cerrarlas ya lo cambia), así que
-        # se exige lo que mide la forma: puntos faciales y estructura
-        same = chk.landmarks <= 0.03 and chk.structure <= 3.0
-        if not same:
-            m = fm_small[..., None]
-            work[Y0:Y1, X0:X1] = np.clip(cand * (1 - m) + ref_img * m, 0, 255).astype(np.uint8)
+        for cand_full in ((work, plain_f) if sym[Y0:Y1, X0:X1].any() else (work,)):
+            cand = np.ascontiguousarray(cand_full[Y0:Y1, X0:X1])
+            chk = check_face(guard, ref, cand, ref_img, fm_small, ignore[Y0:Y1, X0:X1], id_limit, skip_hidden=True)
+            # las grietas y los huecos de la referencia confunden al vector de
+            # identidad, así que se exige lo que mide la forma
+            if chk.landmarks <= 0.03 and chk.structure <= 3.0:
+                break
+        else:
+            # ni así: la cara se queda limpia de barniz y con los huecos
+            # cerrados a lo liso, sin volver a enseñar el daño
+            cand = np.ascontiguousarray(quick[Y0:Y1, X0:X1])
             applied = 0.0
+        if cand_full is not work or applied == 0.0:
+            m = fm_small[..., None]
+            cur = work[Y0:Y1, X0:X1].astype(np.float32)
+            work[Y0:Y1, X0:X1] = np.clip(cur * (1 - m) + cand * m, 0, 255).astype(np.uint8)
+            sym[Y0:Y1, X0:X1] &= fm_small < 0.5
         reports.append(FaceReport(n + 1, fc.rect, applied, chk, 1))
 
     uncolored = None
@@ -331,12 +377,13 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
         "faded": faded,
         "varnish": varnish["removed"],
         "filled_on_faces": fill_info.get("on_faces", 0),
+        "mirrored": int(sym.sum()),
         "engine": "IA de relleno (LaMa)" if fill_info.get("engine") == "LaMa" else "la textura de alrededor",
     }
     return Result(
         work, rgb.copy(), ana, settings, reports, stats,
         _base=clean, _uncolored=uncolored,
-        _masks={"defects": cracks, "damage": losses, "user": user}, _faces=faces,
+        _masks={"defects": cracks, "damage": losses, "user": user, "mirrored": sym}, _faces=faces,
     )
 
 
@@ -360,6 +407,12 @@ def _painting_lines(res: Result, changed: float) -> list[str]:
             f"- Lagunas reintegradas con {st['engine']}: {st['loss_regions'] + st['user_regions']} "
             "(lo que había debajo no se puede recuperar; se continúa lo de alrededor)"
         )
+    if st.get("mirrored"):
+        lines.append(
+            "- Cara: lo que faltaba se ha reconstruido a partir de su lado sano, reflejado y con la luz del sitio "
+            "(en amarillo en el mapa). No se ha generado nada nuevo; lo que estaba en el eje o dañado a los dos "
+            "lados se ha cerrado liso"
+        )
     if st["faded"] > 0:
         lines.append(
             f"- Zonas descoloridas: {100 * st['faded']:.1f}% del cuadro. Se aviva el color que aún conservaban, "
@@ -368,7 +421,7 @@ def _painting_lines(res: Result, changed: float) -> list[str]:
     if s.colorize:
         lines.append("- Color: estimado por IA. Solo se añade color; la forma y la luz son las del cuadro")
     for r in res.faces:
-        lines.append(f"- Rostro {r.index}: " + ("verificado, sin cambios en los rasgos" if r.applied else "devuelto a su estado limpio (por seguridad)"))
+        lines.append(f"- Rostro {r.index}: " + ("verificado, los rasgos sanos no se han movido" if r.applied else "sin reconstruir (no cuadraba con sus rasgos): solo limpio y con los huecos cerrados a lo liso"))
     lines.append(f"- Retoques locales apreciables: {100 * changed:.1f}% del cuadro")
     lines.append("")
     lines.append(f"_Tiempo: {st['seconds']:.1f} s_")
@@ -392,7 +445,8 @@ def intervention_map(res: Result) -> tuple[np.ndarray, float]:
     gray = cv2.cvtColor(cv2.cvtColor(res.before, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
     img = cv2.addWeighted(gray, 0.45, heat, 0.55, 0)
     size = (img.shape[1], img.shape[0])
-    for key, col in (("defects", (255, 0, 255)), ("damage", (255, 0, 255)), ("user", (0, 220, 255))):
+    for key, col in (("defects", (255, 0, 255)), ("damage", (255, 0, 255)), ("user", (0, 220, 255)),
+                     ("mirrored", (255, 210, 0))):
         mk = res._masks.get(key)
         if mk is not None and mk.any():
             dm = cv2.resize(mk, size, interpolation=cv2.INTER_NEAREST) > 0

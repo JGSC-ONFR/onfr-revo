@@ -139,6 +139,40 @@ def test_painting_restored_without_repainting():
     assert d[feat > 0.5].mean() < 2.0, d[feat > 0.5].mean()
 
 
+def test_painting_cracks_ignore_fine_detail():
+    """Pelo, encajes, cables o pinceladas finas no son grietas: en una imagen
+    llena de detalle y sin craquelado casi nada se toma por grieta."""
+    from revo.painting import detect_cracks
+
+    for name in ("astronauta_original.png", "bodegon_original.png"):
+        m = detect_cracks(load(name), 0.35)
+        assert (m > 0).mean() < 0.02, (name, (m > 0).mean())
+    # ni los reflejos pintados (cuchara, platillo) se toman por lagunas
+    from revo.painting import detect_losses
+
+    for name in ("cuadro_original.png", "bodegon_original.png"):
+        assert detect_losses(load(name), 0.35)[1] == 0, name
+
+
+def test_torn_portrait_rebuilt_from_its_own_paint():
+    """Rotura que cruza la cara de un retrato pequeño: del trazo del pincel
+    solo se repara lo dañado, la cara se reconstruye desde su lado sano y la
+    rotura desaparece."""
+    from revo.painting import refine_brush
+
+    oil, torn = load("retrato_original.png"), load("retrato_roto.png")
+    tear = cv2.imread(os.path.join(ROOT, "samples", "retrato_rotura.png"), 0) > 0
+    brush = cv2.imread(os.path.join(ROOT, "samples", "retrato_pincel.png"), 0)
+    m = refine_brush(torn, brush, 0.35) > 0
+    assert m[tear].mean() > 0.95, m[tear].mean()
+    assert m.sum() < 0.8 * (brush > 0).sum(), m.sum() / (brush > 0).sum()
+    res = process(torn, Settings(mode="restaurar_cuadro", intensity=0.35, user_mask=brush))
+    err = lambda x: np.abs(x.astype(np.int16) - oil.astype(np.int16)).mean(-1)  # noqa: E731
+    assert err(res.image)[tear].mean() < 0.4 * err(torn)[tear].mean()
+    assert len(res.faces) == 1 and res.faces[0].applied > 0
+    assert res.stats["mirrored"] > 300, res.stats["mirrored"]
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

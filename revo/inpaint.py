@@ -90,9 +90,15 @@ def _fsr(crop: np.ndarray, hole: np.ndarray) -> np.ndarray:
     f = min(1.0, (BUDGET / (h * w)) ** 0.5)
     small = cv2.resize(crop, None, fx=f, fy=f, interpolation=cv2.INTER_AREA) if f < 1 else crop
     hs = cv2.resize(hole.astype(np.uint8), (small.shape[1], small.shape[0]), interpolation=cv2.INTER_AREA) if f < 1 else hole
+    # FSR deja colores falsos (verdes) si el hueco toca el borde: se amplía
+    # el recorte reflejando lo que hay alrededor
+    p = 16
+    small = cv2.copyMakeBorder(np.ascontiguousarray(small), p, p, p, p, cv2.BORDER_REFLECT)
+    hs = cv2.copyMakeBorder(np.ascontiguousarray(hs.astype(np.uint8)), p, p, p, p, cv2.BORDER_CONSTANT, value=0)
     known = np.where(hs > 0, 0, 255).astype(np.uint8)
     dst = np.zeros_like(small)
-    cv2.xphoto.inpaint(np.ascontiguousarray(small), known, dst, cv2.xphoto.INPAINT_FSR_FAST)
+    cv2.xphoto.inpaint(small, known, dst, cv2.xphoto.INPAINT_FSR_FAST)
+    dst = dst[p:-p, p:-p]
     return cv2.resize(dst, (w, h), interpolation=cv2.INTER_CUBIC) if f < 1 else dst
 
 

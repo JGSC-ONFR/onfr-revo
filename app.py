@@ -553,7 +553,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
             imap = gr.Image(label="Mapa de intervención", type="numpy", interactive=False, visible=False)
             gr.Markdown(
                 "<small>Mapa: calor = retoques locales · magenta = daños reparados automáticamente · "
-                "cian = zonas marcadas con el pincel · recuadro verde = cara mejorada y verificada · naranja = cara conservada.</small>",
+                "cian = daño reparado de lo marcado con el pincel · amarillo = reconstruido desde el lado sano de la cara · recuadro verde = cara mejorada y verificada · naranja = cara conservada.</small>",
                 visible=True,
             )
 
