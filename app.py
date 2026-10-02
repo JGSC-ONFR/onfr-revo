@@ -18,11 +18,11 @@ import numpy as np
 
 from revo import Settings, process
 from revo import colorize as colorizer
-from revo import painting, restore
+from revo import restore
 from revo.analysis import analyze
 from revo.faces import FaceGuard, face_masks
 from revo.inpaint import lama_available, preload
-from revo.pipeline import MAX_WORK, _detect_small, intervention_map, summary_lines
+from revo.pipeline import MAX_WORK, intervention_map, summary_lines
 
 MODE_BUTTONS = [
     ("mejorar", "Mejorar"),
@@ -46,8 +46,8 @@ MODE_HELP = {
     "mejorar": "Fotos actuales o de baja calidad: resolución, ruido, artefactos, nitidez y luz moderada.",
     "restaurar": "Fotos antiguas o deterioradas: polvo, manchas, arañazos, roturas, ruido y contraste. Mantiene la época y la resolución.",
     "mejorar_restaurar": "Proceso completo: restauración → recuperación de calidad → aumento de resolución.",
-    "restaurar_cuadro": "Pinturas: barniz amarillento, suciedad, grietas, lagunas y zonas descoloridas. "
-    "Conserva pincelada, textura, colores y composición: no parece recién pintado.",
+    "restaurar_cuadro": "Pinturas: sube el cuadro y pulsa Restaurar; REVO encuentra solo los desconchones, grietas, "
+    "suciedad y barniz amarillento y los repara. No hace falta pintar nada.",
 }
 PREVIEW_SIDE = 1600  # px de la vista previa ANTES/DESPUÉS
 # Pegar (Ctrl+V) en cualquier parte, y arrastrar imágenes también desde otra
@@ -302,36 +302,27 @@ def _painted(ed, shape):
 def _suggestions(img, mode, intensity, monochrome):
     """Capa del pincel con los daños grandes sugeridos (en rosa)."""
     layer = np.zeros((*img.shape[:2], 4), np.uint8)
-    if not (monochrome or mode == "restaurar_cuadro"):
+    if not monochrome or mode == "restaurar_cuadro":
         return layer
-    faces = _detect_small(FaceGuard.get(), img)
+    faces = FaceGuard.get().detect(img, embed=False)
     fu = np.zeros(img.shape[:2], np.float32)
     ft = np.zeros(img.shape[:2], np.float32)
     for f in faces:
         m1, m2 = face_masks(img.shape, f)
         fu, ft = np.maximum(fu, m1), np.maximum(ft, m2)
-    if mode == "restaurar_cuadro":  # lagunas: pintura caída
-        dmg, regions = painting.detect_losses(img, LEVELS[intensity], ft)
-        flakes = painting.detect_flakes(img, LEVELS[intensity], ft)
-        if flakes.any():
-            dmg, regions = np.maximum(dmg, flakes), regions + 1
-    else:
-        dmg, info = restore.detect_damage(img, True, fu, ft, LEVELS[intensity])
-        regions = info["regions"]
+    dmg, info = restore.detect_damage(img, True, fu, ft, LEVELS[intensity])
+    regions = info["regions"]
     if regions:
         layer[dmg > 0] = MARK_RGBA
     return layer
 
 
-def resuggest(original, mode, intensity):
-    """Al pasar a «Restaurar cuadro» con una foto ya subida, se proponen las
-    lagunas en lugar de las roturas de foto."""
+def clear_marks(original):
+    """En «Restaurar cuadro» no se usa el pincel: se quitan las marcas rosas
+    que hubiera de otro modo."""
     if original is None:
         return gr.update()
-    from revo.analysis import is_monochrome
-
-    layer = _suggestions(original, mode, intensity, is_monochrome(original))
-    return {"background": original, "layers": [layer], "composite": None}
+    return {"background": original, "layers": [], "composite": None}
 
 
 DRIVE_ID = re.compile(r"(?:/file/d/|/d/|[?&]id=)([A-Za-z0-9_-]{20,})")
@@ -388,9 +379,14 @@ def on_upload(ed, original, mode, user_picked, intensity):
     if big:  # fotos de móvil enormes: se trabaja a MAX_WORK px (mucho más rápido)
         f = MAX_WORK / max(img.shape[:2])
         img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+    if user_picked and mode == "restaurar_cuadro":
+        # cuadros: al subir no se analiza nada; todo se hace al pulsar Restaurar
+        return gr.update(), img, gr.update(visible=False), mode, *mode_updates(mode)[1:]
     a = analyze(img)
     if not user_picked:
         mode = a.suggested_mode()
+    if mode == "restaurar_cuadro":
+        return gr.update(), img, gr.update(visible=False), mode, *mode_updates(mode)[1:]
 
     # daños grandes sugeridos: se pintan en la capa del pincel para que puedas
     # revisarlos (borrar o añadir) antes de reparar
@@ -431,8 +427,10 @@ def run(ed, original, mode, intensity, scale, color_on, color_amount):
         scale=int(scale.rstrip("×")),
         colorize=bool(color_on),
         color_amount=COLOR_LEVELS[color_amount],
-        user_mask=_painted(ed, img.shape),
-        auto_damage=False,  # los daños grandes ya están en la capa del pincel
+        user_mask=None if mode == "restaurar_cuadro" else _painted(ed, img.shape),
+        # cuadros: REVO encuentra solo todo el daño; en fotos, los daños
+        # grandes ya están en la capa del pincel
+        auto_damage=mode == "restaurar_cuadro",
     )
     try:
         res = process(img, s)
@@ -564,7 +562,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
     for (m, _), b in zip(MODE_BUTTONS, buttons):
         ev = b.click(lambda m=m: mode_updates(m), None, mode_outputs).then(lambda: True, None, user_picked)
         if m == "restaurar_cuadro":
-            ev.then(resuggest, [original, mode, intensity], editor)
+            ev.then(clear_marks, original, editor)
 
     # el botón espera a que termine el análisis (y las marcas rosas)
     def analyzed(ev):
