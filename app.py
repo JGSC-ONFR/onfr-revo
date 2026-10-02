@@ -7,8 +7,10 @@ from __future__ import annotations
 import base64
 import os
 import random
+import re
 import tempfile
 import time
+import urllib.request
 
 import cv2
 import gradio as gr
@@ -48,6 +50,79 @@ MODE_HELP = {
     "Conserva pincelada, textura, colores y composición: no parece recién pintado.",
 }
 PREVIEW_SIDE = 1600  # px de la vista previa ANTES/DESPUÉS
+# Pegar (Ctrl+V) en cualquier parte, y arrastrar imágenes también desde otra
+# web como Google Drive: se mandan al buzón oculto «revo-inbox».
+PASTE_JS = """
+<script>
+(() => {
+  // la imagen entra por el mismo camino que si la eligieras con «Subir».
+  // Antes se vacía el editor: si la foto nueva cae encima de la anterior,
+  // el editor repite la subida y se traga la siguiente.
+  const inject = (file) => {
+    const clear = document.querySelector('#editor button[aria-label="Clear canvas"]');
+    const go = () => {
+      const input = document.querySelector('#editor input[type=file]');
+      if (!input) return;
+      const dt = new DataTransfer(); dt.items.add(file);
+      input.files = dt.files;
+      const ev = new Event('change', {bubbles: true}); ev.revo = true;
+      input.dispatchEvent(ev);
+    };
+    if (clear && window.revoHasImage) { clear.click(); setTimeout(go, 250); } else go();
+    window.revoHasImage = true;
+  };
+  // también las fotos que eliges con «Subir» o sueltas sobre el editor
+  document.addEventListener('change', (e) => {
+    if (e.revo || !e.target.matches || !e.target.matches('#editor input[type=file]')) return;
+    const file = e.target.files && e.target.files[0];
+    if (!file || !window.revoHasImage) { window.revoHasImage = !!file; return; }
+    e.stopImmediatePropagation(); e.preventDefault();
+    inject(file);
+  }, true);
+  window.revoInject = (dataUrl) => {
+    if (!dataUrl) return;
+    fetch(dataUrl).then(r => r.blob()).then(b => inject(new File([b], 'imagen.png', {type: b.type || 'image/png'})));
+  };
+  // un enlace (p. ej. de Google Drive) lo descarga REVO y luego lo sube
+  const send = (url) => {
+    const box = document.querySelector('#revo-inbox textarea, #revo-inbox input');
+    if (!box) return;
+    box.value = url;
+    box.dispatchEvent(new Event('input', {bubbles: true}));
+    setTimeout(() => document.querySelector('#revo-fetch')?.click(), 50);
+  };
+  const sendFile = (file) => inject(file);
+  const urlFrom = (dt) => {
+    const list = (dt.getData('text/uri-list') || '').split('\\n').find(l => l && !l.startsWith('#'));
+    if (list) return list.trim();
+    const html = dt.getData('text/html') || '';
+    const m = html.match(/href="([^"]+)"/) || html.match(/src="([^"]+)"/);
+    if (m) return m[1].replace(/&amp;/g, '&');
+    const t = (dt.getData('text/plain') || '').trim();
+    return /^https?:\\/\\//.test(t) ? t : '';
+  };
+  document.addEventListener('paste', (e) => {
+    if (e.target.closest && e.target.closest('input, textarea')) return;
+    const dt = e.clipboardData; if (!dt) return;
+    const file = [...dt.files].find(f => f.type.startsWith('image/'));
+    if (file) { e.preventDefault(); sendFile(file); return; }
+    const url = urlFrom(dt);
+    if (url) { e.preventDefault(); send(url); }
+  });
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', (e) => {
+    const dt = e.dataTransfer; if (!dt) return;
+    const file = [...dt.files].find(f => f.type.startsWith('image/'));
+    if (file) {
+      e.preventDefault(); e.stopPropagation(); sendFile(file); return;
+    }
+    const url = urlFrom(dt);
+    if (url) { e.preventDefault(); e.stopPropagation(); send(url); }
+  }, true);
+})();
+</script>
+"""
+
 # niveles en lugar de números (como el selector de esfuerzo)
 LEVELS = {"Bajo": 0.15, "Medio": 0.35, "Alto": 0.55, "Ultra": 0.75, "Max": 1.0}
 COLOR_LEVELS = {"Bajo": 0.4, "Medio": 0.6, "Alto": 0.8, "Ultra": 1.0, "Max": 1.2}
@@ -105,6 +180,7 @@ button.mode-btn:nth-child(4) {background:linear-gradient(135deg,#10b981,#84cc16)
   box-shadow:0 4px 14px rgba(219,39,119,.35) !important}
 
 footer {display:none !important}
+#revo-inbox, #revo-fetch, #revo-outbox {display:none !important}
 
 #go-btn {min-height:64px; font-size:1.3rem; letter-spacing:.14rem; font-weight:900; border:none !important;
   color:#fff !important; border-radius:18px !important;
@@ -183,15 +259,10 @@ def _background(ed):
 def _source(ed, original):
     """La foto que se repara: siempre el original guardado al subirla, nunca
     la copia (comprimida) que el editor reenvía."""
-    if original is not None and _has_image(ed):
+    bg = _background(ed)
+    if original is not None and bg is not None and bg.shape == original.shape and _same(bg, original):
         return original
-    return _background(ed)
-
-
-def _has_image(ed):
-    if isinstance(ed, dict):
-        return ed.get("background") is not None
-    return ed is not None
+    return bg  # el editor tiene otra foto que no llegó a analizarse
 
 
 def _shrink(img, side, interp=cv2.INTER_AREA):
@@ -260,10 +331,56 @@ def resuggest(original, mode, intensity):
     return {"background": original, "layers": [layer], "composite": None}
 
 
-def on_upload(ed, mode, user_picked, intensity):
+DRIVE_ID = re.compile(r"(?:/file/d/|/d/|[?&]id=)([A-Za-z0-9_-]{20,})")
+
+
+def _download(url: str) -> bytes:
+    """Descarga una imagen de internet. Los enlaces de Google Drive se
+    convierten en descarga directa (funciona si el archivo está compartido
+    con «Cualquier persona con el enlace»)."""
+    m = DRIVE_ID.search(url) if "google" in url else None
+    if m:
+        url = f"https://drive.usercontent.google.com/download?id={m.group(1)}&export=download&confirm=t"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ONFR REVO)"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read(60 * 1024 * 1024)
+
+
+def receive(url: str) -> str:
+    """Imagen arrastrada o pegada como enlace desde otra web, p. ej. Google
+    Drive. REVO la descarga y la devuelve a la página, que la sube como si
+    la hubieras elegido con «Subir»."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    try:
+        raw = _download(url)
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    except Exception:  # noqa: BLE001
+        img = None
+    if img is None:
+        gr.Warning(
+            "No he podido abrir esa imagen. Si es de Google Drive, compártela con «Cualquier persona con el "
+            "enlace», o en Drive haz clic derecho en la imagen → «Copiar imagen» y pégala aquí con Ctrl+V."
+        )
+        return ""
+    ok, png = cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+    return "data:image/png;base64," + base64.b64encode(png.tobytes()).decode()
+
+
+def _same(a, b) -> bool:
+    d = cv2.absdiff(a, b)
+    return float(d.mean()) < 3.0 and float(np.percentile(d, 99)) < 40
+
+
+def on_upload(ed, original, mode, user_picked, intensity):
     img = _background(ed)
     if img is None:
         return gr.update(), None, gr.update(visible=False), mode, *mode_updates(mode)[1:]
+    if original is not None and img.shape == original.shape and _same(img, original):
+        # al cambiar de foto, el editor repite «upload» cada vez que recibe las
+        # marcas rosas (con la foto recomprimida): es la misma, no se analiza otra vez
+        return (gr.update(),) * (3 + len(mode_updates(mode)))
     big = max(img.shape[:2]) > MAX_WORK
     if big:  # fotos de móvil enormes: se trabaja a MAX_WORK px (mucho más rápido)
         f = MAX_WORK / max(img.shape[:2])
@@ -394,8 +511,13 @@ with gr.Blocks(title="ONFR REVO") as demo:
                 transforms=(),
                 layers=False,
                 height=520,
+                elem_id="editor",
             )
             editor.preprocess = _retrying(editor.preprocess)
+            # buzón oculto: aquí llega lo que se pega o se arrastra desde otra web
+            inbox = gr.Textbox(elem_id="revo-inbox", show_label=False, container=False)
+            fetch = gr.Button(elem_id="revo-fetch")
+            inbox_out = gr.Textbox(elem_id="revo-outbox", show_label=False, container=False)
             intensity = gr.Radio(list(LEVELS), value="Medio", label="Intervención", elem_classes="levels")
             with gr.Group(visible=False) as color_box:
                 color_on = gr.Checkbox(
@@ -442,9 +564,18 @@ with gr.Blocks(title="ONFR REVO") as demo:
             ev.then(resuggest, [original, mode, intensity], editor)
 
     # el botón espera a que termine el análisis (y las marcas rosas)
-    editor.upload(lambda: gr.update(interactive=False, value="Analizando la imagen…"), None, go).then(
-        on_upload, [editor, mode, user_picked, intensity], [editor, original, color_box, *mode_outputs]
-    ).then(lambda m: gr.update(interactive=True, value=ACTION[m]), mode, go)
+    def analyzed(ev):
+        ev.then(on_upload, [editor, original, mode, user_picked, intensity], [editor, original, color_box, *mode_outputs]).then(
+            lambda m: gr.update(interactive=True, value=ACTION[m]), mode, go
+        )
+
+    analyzed(editor.upload(lambda: gr.update(interactive=False, value="Analizando la imagen…"), None, go))
+    # un enlace arrastrado o pegado: se descarga y la página lo sube al editor
+    fetch.click(lambda: gr.update(interactive=False, value="Descargando la imagen…"), None, go).then(
+        receive, inbox, inbox_out
+    ).then(None, inbox_out, None, js="(d) => { window.revoInject(d); }").then(
+        lambda d, m: gr.update() if d else gr.update(interactive=True, value=ACTION[m]), [inbox_out, mode], go
+    )
     color_on.change(lambda on: gr.update(visible=bool(on)), color_on, color_amount)
     start = go.click(anim_html, original, [anim, slider], show_progress="hidden")
     work = start.then(
@@ -464,6 +595,7 @@ if __name__ == "__main__":
     demo.queue().launch(
         theme=gr.themes.Soft(primary_hue="violet", secondary_hue="pink", neutral_hue="slate"),
         css=CSS,
+        head=PASTE_JS,
         server_name=os.environ.get("REVO_HOST", "127.0.0.1"),
         server_port=int(os.environ.get("REVO_PORT", "7860")),
         inbrowser=os.environ.get("REVO_OPEN_BROWSER") == "1",
