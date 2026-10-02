@@ -22,8 +22,7 @@ from revo import painting, restore
 from revo.analysis import analyze
 from revo.faces import FaceGuard, face_masks
 from revo.inpaint import lama_available, preload
-from revo import gemini
-from revo.pipeline import MAX_WORK, _detect_small, intervention_map, process_gemini, summary_lines
+from revo.pipeline import MAX_WORK, _detect_small, intervention_map, summary_lines
 
 MODE_BUTTONS = [
     ("mejorar", "Mejorar"),
@@ -422,20 +421,7 @@ def anim_html(original):
     return gr.update(value=html, visible=True), gr.update(visible=False)
 
 
-def save_gemini_key(key):
-    key = (key or "").strip()
-    if not key:
-        return gr.update(), "_Pega la clave (empieza por «AIza»)._"
-    gemini.save_key(key)
-    return gr.update(value=""), "**Clave guardada en este ordenador.** Ya puedes restaurar cuadros con Gemini."
-
-
-def _gemini_status():
-    return ("_Clave de Gemini guardada en este ordenador._" if gemini.get_key()
-            else "_Sin clave: crea una gratis en aistudio.google.com («Get API key») y pégala aquí._")
-
-
-def run(ed, original, mode, intensity, scale, color_on, color_amount, use_gemini=False):
+def run(ed, original, mode, intensity, scale, color_on, color_amount):
     img = _source(ed, original)
     if img is None:
         raise gr.Error("Primero sube una imagen.")
@@ -448,16 +434,8 @@ def run(ed, original, mode, intensity, scale, color_on, color_amount, use_gemini
         user_mask=_painted(ed, img.shape),
         auto_damage=False,  # los daños grandes ya están en la capa del pincel
     )
-    note = ""
     try:
-        res = None
-        if mode == "restaurar_cuadro" and use_gemini:
-            try:
-                res = process_gemini(img, s)
-            except gemini.GeminiError as e:
-                note = f" No se ha usado Gemini: {e} Se ha restaurado con REVO, sin internet."
-        if res is None:
-            res = process(img, s)
+        res = process(img, s)
     except Exception as e:  # noqa: BLE001  la animación no debe quedarse girando
         import traceback
 
@@ -482,7 +460,7 @@ def run(ed, original, mode, intensity, scale, color_on, color_amount, use_gemini
         gr.update(value="", visible=False),
         gr.update(value=out_path, visible=True),
         gr.update(visible=True),
-        gr.update(value=f"_Listo en {t:.1f} s._" + (f"\n\n**{note.strip()}**" if note else ""), visible=True),
+        gr.update(value=f"_Listo en {t:.1f} s._", visible=True),
         gr.update(value="", visible=False),
         gr.update(value=None, visible=False),
     )
@@ -565,15 +543,6 @@ with gr.Blocks(title="ONFR REVO") as demo:
             with gr.Accordion("Ajustes avanzados", open=False):
                 with gr.Group() as scale_box:
                     scale = gr.Radio(["2×", "4×", "1×"], value="2×", label="Aumento de resolución")
-                with gr.Group():
-                    use_gemini = gr.Checkbox(
-                        label="Restaurar cuadros con Gemini (IA de Google, en la nube). La foto se envía a Google "
-                        "y la IA vuelve a pintar lo perdido: puede cambiar algún detalle",
-                        value=True,
-                    )
-                    gemini_key = gr.Textbox(label="Clave de Gemini", type="password", placeholder="AIza…")
-                    gemini_save = gr.Button("Guardar clave", size="sm")
-                    gemini_msg = gr.Markdown(_gemini_status())
             go = gr.Button(ACTION["mejorar_restaurar"], variant="primary", elem_id="go-btn")
 
         with gr.Column(scale=1):
@@ -595,9 +564,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
     for (m, _), b in zip(MODE_BUTTONS, buttons):
         ev = b.click(lambda m=m: mode_updates(m), None, mode_outputs).then(lambda: True, None, user_picked)
         if m == "restaurar_cuadro":
-            ev.then(lambda: gr.update(interactive=False, value="Buscando daños…"), None, go).then(
-                resuggest, [original, mode, intensity], editor
-            ).then(lambda m: gr.update(interactive=True, value=ACTION[m]), mode, go)
+            ev.then(resuggest, [original, mode, intensity], editor)
 
     # el botón espera a que termine el análisis (y las marcas rosas)
     def analyzed(ev):
@@ -613,11 +580,10 @@ with gr.Blocks(title="ONFR REVO") as demo:
         lambda d, m: gr.update() if d else gr.update(interactive=True, value=ACTION[m]), [inbox_out, mode], go
     )
     color_on.change(lambda on: gr.update(visible=bool(on)), color_on, color_amount)
-    gemini_save.click(save_gemini_key, gemini_key, [gemini_key, gemini_msg])
     start = go.click(anim_html, original, [anim, slider], show_progress="hidden")
     work = start.then(
         run,
-        [editor, original, mode, intensity, scale, color_on, color_amount, use_gemini],
+        [editor, original, mode, intensity, scale, color_on, color_amount],
         [result, slider, anim, save, summary_btn, done_md, summary, imap],
         show_progress="hidden",
     )

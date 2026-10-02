@@ -194,44 +194,6 @@ def test_flaking_painting_detected_but_clean_one_not():
     assert (m & ~cv2.dilate(gt, np.ones((7, 7), np.uint8)).astype(bool)).mean() < 0.04
 
 
-def test_gemini_restoration_flow_without_network():
-    """Restaurar cuadro con Gemini: se envía la foto con las instrucciones y
-    el cuadro devuelto vuelve al tamaño original (sin red: respuesta simulada)."""
-    import base64
-    import json
-
-    from revo import gemini
-    from revo.pipeline import process_gemini, summary_lines
-
-    img = load("cuadro_deteriorado.png")
-    clean = load("cuadro_original.png")
-    sent = {}
-
-    def fake_post(model, key, body):
-        sent.update(model=model, key=key, body=json.loads(body))
-        small = cv2.resize(clean, (512, 512))
-        ok, buf = cv2.imencode(".png", cv2.cvtColor(small, cv2.COLOR_RGB2BGR))
-        data = base64.b64encode(buf.tobytes()).decode()
-        return {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": data}}]}}]}
-
-    real = gemini._post
-    gemini._post = fake_post
-    try:
-        res = process_gemini(img, Settings(mode="restaurar_cuadro"), key="AIzaPRUEBA")
-    finally:
-        gemini._post = real
-    assert sent["key"] == "AIzaPRUEBA" and sent["model"] == gemini.MODELS[0]
-    parts = sent["body"]["contents"][0]["parts"]
-    assert "Restore" in parts[0]["text"] and parts[1]["inline_data"]["mime_type"] == "image/jpeg"
-    assert res.image.shape == img.shape
-    assert any("Gemini" in line for line in summary_lines(res))
-    try:
-        gemini.restore(img, key="")
-        raise AssertionError("sin clave debería fallar")
-    except gemini.GeminiError as e:
-        assert "clave" in str(e)
-
-
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

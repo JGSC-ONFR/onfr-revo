@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from . import colorize as colorizer
-from . import enhance, gemini, inpaint, painting, restore, symmetry
+from . import enhance, inpaint, painting, restore, symmetry
 from .analysis import Analysis, analyze, estimate_noise
 from .faces import Face, FaceGuard, face_masks
 from .fidelity import FaceCheck, check_face, identity_limit
@@ -94,19 +94,6 @@ def _crop_box(face: Face, shape, pad=0.6):
 def _shift(face: Face, dx, dy) -> Face:
     x0, y0, x1, y1 = face.rect
     return Face((x0 - dx, y0 - dy, x1 - dx, y1 - dy), face.landmarks - [dx, dy], face.embedding)
-
-
-def process_gemini(rgb: np.ndarray, settings: Settings, key: str | None = None) -> Result:
-    """Restaurar cuadro con Gemini (IA generativa en la nube)."""
-    t0 = time.time()
-    rgb = np.ascontiguousarray(rgb[..., :3])
-    h, w = rgb.shape[:2]
-    f = min(1.0, MAX_OUT / max(h, w))
-    if f < 1:
-        rgb = cv2.resize(rgb, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
-    out, model = gemini.restore(rgb, key)
-    stats = {"seconds": time.time() - t0, "original_size": (w, h), "gemini": model}
-    return Result(out, rgb.copy(), analyze(rgb), settings, [], stats, _base=rgb.copy(), _masks={}, _faces=[])
 
 
 def _detect_small(guard: FaceGuard, rgb: np.ndarray) -> list[Face]:
@@ -413,20 +400,6 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
 
 def _painting_lines(res: Result, changed: float) -> list[str]:
     s, st = res.settings, res.stats
-    if st.get("gemini"):
-        ow, oh = st["original_size"]
-        nh, nw = res.image.shape[:2]
-        return [
-            "**Cuadro restaurado con Gemini (IA generativa de Google)**  ",
-            f"Resolución: {ow} × {oh} → {nw} × {nh}",
-            "",
-            "- La IA ha vuelto a pintar las zonas perdidas y ha limpiado el resto.",
-            "- Puede haber cambiado algún detalle (rasgos, animales, firma): compáralo con el original "
-            "en el «antes ⟷ después». El mapa muestra dónde ha cambiado.",
-            f"- Zonas cambiadas apreciablemente: {100 * changed:.1f}% del cuadro",
-            "",
-            f"_Tiempo: {st['seconds']:.1f} s_",
-        ]
     ow, oh = st["original_size"]
     nh, nw = res.image.shape[:2]
     da, db = st["varnish"]
