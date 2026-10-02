@@ -138,6 +138,21 @@ CSS = """
   radial-gradient(900px 600px at 0% 100%, rgba(219,39,119,.30), transparent 62%),
   #fbf7ff !important}
 #revo-title {text-align:center; margin-top:8px}
+/* interruptores tipo iOS (Colorear, Gemini) */
+.switch label {display:flex !important; align-items:center; gap:14px; font-size:1.05rem; font-weight:600;
+  padding:10px 4px; cursor:pointer}
+.switch input[type=checkbox] {appearance:none; -webkit-appearance:none; flex:none; width:58px; height:34px;
+  border-radius:34px; background:#e5e5ea; position:relative; cursor:pointer; transition:background .25s;
+  border:none !important; box-shadow:inset 0 0 0 1px rgba(0,0,0,.06) !important; margin:0}
+.switch input[type=checkbox]::after {content:""; position:absolute; top:3px; left:3px; width:28px; height:28px;
+  border-radius:50%; background:#fff; box-shadow:0 2px 5px rgba(0,0,0,.25); transition:left .25s}
+.switch input[type=checkbox]:checked {background:#34c759 !important}
+.switch input[type=checkbox]:checked::after {left:27px}
+.switch input[type=checkbox]:checked::before, .switch input[type=checkbox]::before {display:none}
+/* ventanita de la clave de Gemini */
+#gemini-modal {position:fixed !important; top:50%; left:50%; transform:translate(-50%,-50%); z-index:1000;
+  width:min(380px, 90vw); height:auto !important; padding:18px 20px !important; gap:10px; border-radius:18px !important; background:#fff !important;
+  box-shadow:0 0 0 100vmax rgba(20,10,40,.35), 0 20px 50px rgba(0,0,0,.3) !important}
 #revo-title h1 {font-size:3.4rem; letter-spacing:.45rem; margin-bottom:4px; font-weight:900;
   background:linear-gradient(110deg, #7c3aed, #db2777, #f97316, #eab308, #10b981, #06b6d4, #7c3aed);
   -webkit-background-clip:text; background-clip:text; color:transparent;
@@ -418,17 +433,31 @@ def anim_html(original):
     return gr.update(value=html, visible=True), gr.update(visible=False)
 
 
-def save_gemini_key(key):
-    key = (key or "").strip()
-    if not key:
-        return gr.update(), "_Pega la clave (empieza por «AIza»)._"
-    gemini.save_key(key)
-    return gr.update(value=""), "**Clave guardada en este ordenador.** Ya puedes restaurar cuadros con Gemini."
+def gemini_toggle(on):
+    """Al encender Gemini se abre la ventanita de la clave; al apagarlo, se apaga."""
+    if on:
+        return gr.update(visible=True), gr.update(value="")
+    gemini.set_enabled(False)
+    return gr.update(visible=False), gr.update(value="")
 
 
-def _gemini_status():
-    return ("_Clave de Gemini guardada en este ordenador._" if gemini.get_key()
-            else "_Sin clave: crea una gratis en aistudio.google.com («Get API key») y pégala aquí._")
+def gemini_accept(key):
+    key = (key or "").strip() or gemini.get_key()
+    err = gemini.check_key(key)
+    if err:
+        gr.Warning(f"Gemini no se ha activado: {err}", title="Error en la clave API")
+        gemini.set_enabled(False)
+        return gr.update(value=False), gr.update(visible=False), gr.update(value="")
+    if key != gemini.get_key():
+        gemini.save_key(key)
+    gemini.set_enabled(True)
+    gr.Info("Restaurar cuadro usará Gemini.", title="Gemini activado")
+    return gr.update(value=True), gr.update(visible=False), gr.update(value="")
+
+
+def gemini_cancel():
+    gemini.set_enabled(False)
+    return gr.update(value=False), gr.update(visible=False), gr.update(value="")
 
 
 def run(ed, original, mode, intensity, scale, color_on, color_amount, use_gemini=False):
@@ -544,6 +573,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
             intensity = gr.Radio(list(LEVELS), value="Medio", label="Intervención", elem_classes="levels")
             with gr.Group(visible=False) as color_box:
                 color_on = gr.Checkbox(
+                    elem_classes="switch",
                     label=(
                         "Colorear  (los colores son una estimación de la IA, no información recuperada)"
                         if COLOR_OK
@@ -555,6 +585,21 @@ with gr.Blocks(title="ONFR REVO") as demo:
                 color_amount = gr.Radio(
                     list(COLOR_LEVELS), value="Alto", label="Intensidad del color", visible=False, elem_classes="levels"
                 )
+            with gr.Group(visible=False) as gemini_box:
+                use_gemini = gr.Checkbox(
+                    label="Restaurar con Gemini  (IA de Google: el cuadro se envía a Google y repinta lo perdido)",
+                    value=gemini.get_enabled() and bool(gemini.get_key()),
+                    elem_classes="switch",
+                )
+            with gr.Column(visible=False, elem_id="gemini-modal") as gemini_modal:
+                gr.Markdown("### Clave API Gemini")
+                gemini_key = gr.Textbox(
+                    show_label=False, type="password",
+                    placeholder="Pega tu clave (AIza…)" if not gemini.get_key() else "Déjalo vacío para usar la guardada",
+                )
+                with gr.Row():
+                    gemini_cancel_btn = gr.Button("Cancelar", size="sm")
+                    gemini_ok = gr.Button("Aceptar", variant="primary", size="sm")
             gr.Markdown(
                 "**Protección facial  ● ON** — siempre activa. REVO no inventa rasgos: si no puede "
                 "mejorar una cara con seguridad, la deja como estaba.",
@@ -563,15 +608,6 @@ with gr.Blocks(title="ONFR REVO") as demo:
             with gr.Accordion("Ajustes avanzados", open=False):
                 with gr.Group() as scale_box:
                     scale = gr.Radio(["2×", "4×", "1×"], value="2×", label="Aumento de resolución")
-                with gr.Group():
-                    use_gemini = gr.Checkbox(
-                        label="Restaurar cuadros con Gemini (IA de Google, en la nube). La foto se envía a Google "
-                        "y la IA vuelve a pintar lo perdido: puede cambiar algún detalle",
-                        value=True,
-                    )
-                    gemini_key = gr.Textbox(label="Clave de Gemini", type="password", placeholder="AIza…")
-                    gemini_save = gr.Button("Guardar clave", size="sm")
-                    gemini_msg = gr.Markdown(_gemini_status())
             go = gr.Button(ACTION["mejorar_restaurar"], variant="primary", elem_id="go-btn")
 
         with gr.Column(scale=1):
@@ -609,7 +645,11 @@ with gr.Blocks(title="ONFR REVO") as demo:
         lambda d, m: gr.update() if d else gr.update(interactive=True, value=ACTION[m]), [inbox_out, mode], go
     )
     color_on.change(lambda on: gr.update(visible=bool(on)), color_on, color_amount)
-    gemini_save.click(save_gemini_key, gemini_key, [gemini_key, gemini_msg])
+    mode.change(lambda m: gr.update(visible=m == "restaurar_cuadro"), mode, gemini_box)
+    use_gemini.input(gemini_toggle, use_gemini, [gemini_modal, gemini_key])
+    gemini_ok.click(gemini_accept, gemini_key, [use_gemini, gemini_modal, gemini_key])
+    gemini_key.submit(gemini_accept, gemini_key, [use_gemini, gemini_modal, gemini_key])
+    gemini_cancel_btn.click(gemini_cancel, None, [use_gemini, gemini_modal, gemini_key])
     start = go.click(anim_html, original, [anim, slider], show_progress="hidden")
     work = start.then(
         run,

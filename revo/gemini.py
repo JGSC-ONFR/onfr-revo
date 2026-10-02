@@ -26,6 +26,7 @@ KEY_FILE = os.path.join(ROOT, "revo_clave.txt")  # también se puede pegar la cl
 # de mejor a peor; si uno no está disponible para la clave, se prueba el siguiente
 MODELS = ("gemini-2.5-flash-image", "gemini-2.5-flash-image-preview")
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+MODEL_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}"
 SEND_SIDE = 2048  # px del lado largo que se envían
 
 PROMPT = (
@@ -75,6 +76,47 @@ def save_key(key: str) -> None:
         json.dump(data, f)
 
 
+def check_key(key: str) -> str:
+    """Comprueba la clave con una consulta mínima (sin enviar ninguna foto).
+    Devuelve "" si funciona o el motivo del error, en palabras sencillas."""
+    key = (key or "").strip()
+    if not key:
+        return "no has puesto ninguna clave."
+    req = urllib.request.Request(MODEL_URL.format(model=MODELS[0]), headers={"x-goog-api-key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            r.read()
+        return ""
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error", {}).get("message", "")
+        except ValueError:
+            msg = ""
+        return _explain(f"{e.code}: {msg}")
+    except urllib.error.URLError as e:
+        return f"no hay conexión con Google ({e.reason})."
+
+
+def get_enabled() -> bool:
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            return bool(json.load(f).get("gemini_on", False))
+    except (OSError, ValueError):
+        return False
+
+
+def set_enabled(on: bool) -> None:
+    data = {}
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        pass
+    data["gemini_on"] = bool(on)
+    with open(CONFIG, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+
 def _post(model: str, key: str, body: bytes) -> dict:
     req = urllib.request.Request(
         ENDPOINT.format(model=model),
@@ -96,7 +138,7 @@ def _post(model: str, key: str, body: bytes) -> dict:
 
 def _explain(err: str) -> str:
     if "API key not valid" in err or "API_KEY_INVALID" in err:
-        return "la clave de Gemini no es válida. Revísala en Ajustes avanzados."
+        return "la clave de Gemini no es válida."
     if err.startswith("429"):
         return "Gemini dice que se ha superado el límite de uso de tu clave. Espera un poco o revisa tu plan."
     if err.startswith("403"):
