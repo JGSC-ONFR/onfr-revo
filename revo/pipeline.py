@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from . import colorize as colorizer
-from . import enhance, gemini, inpaint, painting, restore, symmetry
+from . import cloud, enhance, gemini, inpaint, painting, restore, symmetry
 from .analysis import Analysis, analyze, estimate_noise
 from .faces import Face, FaceGuard, face_masks
 from .fidelity import FaceCheck, check_face, identity_limit
@@ -107,6 +107,21 @@ def process_gemini(rgb: np.ndarray, settings: Settings, key: str | None = None) 
         rgb = cv2.resize(rgb, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
     out, model = gemini.restore(rgb, key)
     stats = {"seconds": time.time() - t0, "original_size": (w, h), "gemini": model}
+    return Result(out, rgb.copy(), analyze(rgb), settings, [], stats, _base=rgb.copy(), _masks={}, _faces=[])
+
+
+def process_cloud(rgb: np.ndarray, settings: Settings, engine: str, call=None) -> Result:
+    """Restaurar cuadro con IA gratuita de Hugging Face (FLUX o Qwen). Estas IA
+    dejan el barniz amarillo, así que después REVO lo limpia."""
+    t0 = time.time()
+    rgb = np.ascontiguousarray(rgb[..., :3])
+    h, w = rgb.shape[:2]
+    f = min(1.0, MAX_OUT / max(h, w))
+    if f < 1:
+        rgb = cv2.resize(rgb, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+    out = cloud.restore(rgb, engine, call)
+    out, _ = painting.clean_varnish(out, float(np.clip(settings.intensity, 0, 1)))
+    stats = {"seconds": time.time() - t0, "original_size": (w, h), "cloud": engine}
     return Result(out, rgb.copy(), analyze(rgb), settings, [], stats, _base=rgb.copy(), _masks={}, _faces=[])
 
 

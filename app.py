@@ -22,8 +22,8 @@ from revo import restore
 from revo.analysis import analyze
 from revo.faces import FaceGuard, face_masks
 from revo.inpaint import lama_available, preload
-from revo import gemini
-from revo.pipeline import MAX_WORK, intervention_map, process_gemini, summary_lines
+from revo import cloud, gemini
+from revo.pipeline import MAX_WORK, intervention_map, process_cloud, process_gemini, summary_lines
 
 MODE_BUTTONS = [
     ("mejorar", "Mejorar"),
@@ -150,7 +150,7 @@ CSS = """
 .switch input[type=checkbox]:checked::after {left:27px}
 .switch input[type=checkbox]:checked::before, .switch input[type=checkbox]::before {display:none}
 /* ventanita de la clave de Gemini */
-#gemini-modal {position:fixed !important; top:50%; left:50%; transform:translate(-50%,-50%); z-index:1000;
+#gemini-modal, #hf-modal {position:fixed !important; top:50%; left:50%; transform:translate(-50%,-50%); z-index:1000;
   width:min(380px, 90vw); height:auto !important; padding:18px 20px !important; gap:10px; border-radius:18px !important; background:#fff !important;
   box-shadow:0 0 0 100vmax rgba(20,10,40,.35), 0 20px 50px rgba(0,0,0,.3) !important}
 #revo-title h1 {font-size:3.4rem; letter-spacing:.45rem; margin-bottom:4px; font-weight:900;
@@ -455,12 +455,56 @@ def gemini_accept(key):
     return gr.update(value=True), gr.update(visible=False), gr.update(value="")
 
 
+def hf_accept(tok):
+    tok = (tok or "").strip()
+    err = cloud.check_token(tok)
+    if err:
+        gr.Warning(f"Qwen no se ha activado: {err}", title="Error en el token")
+        return gr.update(visible=True), gr.update(value=""), gr.update()
+    cloud.save_token(tok)
+    gr.Info("Si FLUX falla, REVO probará con Qwen.", title="Qwen activado")
+    return gr.update(visible=False), gr.update(value=""), gr.update(value="Qwen activado · cambiar token de Hugging Face")
+
+
 def gemini_cancel():
     gemini.set_enabled(False)
     return gr.update(value=False), gr.update(visible=False), gr.update(value="")
 
 
-def run(ed, original, mode, intensity, scale, color_on, color_amount, use_gemini=False):
+def _restore_ai(img, s, use_gemini, use_ia):
+    """Restaurar cuadro con IA: Gemini (si está activado), FLUX, Qwen. Avisa de
+    cada paso; si todas fallan devuelve None y restaura REVO."""
+    tried = []
+    if use_gemini:
+        gr.Info("Enviando el cuadro a Gemini…", title="Restaurando con Gemini")
+        try:
+            res = process_gemini(img, s)
+            gr.Info("Cuadro restaurado con Gemini.", title="Listo")
+            return res, "Restaurado con Gemini."
+        except gemini.GeminiError as e:
+            tried.append(f"Gemini: {e}")
+            nxt = "FLUX" if use_ia else "REVO"
+            gr.Warning(f"{e} Paso a {nxt}.", title="Gemini no ha funcionado")
+    if use_ia:
+        engines = [n for n, _ in cloud.ENGINES]
+        for i, name in enumerate(engines):
+            if i == 0:
+                gr.Info("Enviando el cuadro a FLUX (gratis, unos 30-60 s)…", title="Restaurando con FLUX")
+            try:
+                res = process_cloud(img, s, name)
+                gr.Info(f"Cuadro restaurado con {name}.", title="Listo")
+                return res, f"Restaurado con {name}."
+            except cloud.CloudError as e:
+                tried.append(f"{name}: {e}")
+                nxt = engines[i + 1] if i + 1 < len(engines) else "REVO"
+                extra = " (sin internet)" if nxt == "REVO" else ""
+                gr.Warning(f"{name} {e}. Paso a {nxt}{extra}.", title=f"{name} no ha funcionado")
+    if tried:
+        return None, "Restaurado con REVO, sin internet. " + " · ".join(tried) + "."
+    return None, ""
+
+
+def run(ed, original, mode, intensity, scale, color_on, color_amount, use_gemini=False, use_ia=False):
     img = _source(ed, original)
     if img is None:
         raise gr.Error("Primero sube una imagen.")
@@ -478,11 +522,8 @@ def run(ed, original, mode, intensity, scale, color_on, color_amount, use_gemini
     note = ""
     try:
         res = None
-        if mode == "restaurar_cuadro" and use_gemini:
-            try:
-                res = process_gemini(img, s)
-            except gemini.GeminiError as e:
-                note = f" No se ha usado Gemini: {e} Se ha restaurado con REVO, sin internet."
+        if mode == "restaurar_cuadro":
+            res, note = _restore_ai(img, s, use_gemini, use_ia)
         if res is None:
             res = process(img, s)
     except Exception as e:  # noqa: BLE001  la animación no debe quedarse girando
@@ -586,6 +627,16 @@ with gr.Blocks(title="ONFR REVO") as demo:
                     list(COLOR_LEVELS), value="Alto", label="Intensidad del color", visible=False, elem_classes="levels"
                 )
             with gr.Group(visible=False) as gemini_box:
+                use_ia = gr.Checkbox(
+                    label="IA gratis en la nube  (FLUX y, si falla, Qwen: el cuadro se envía a Hugging Face y repinta lo perdido)",
+                    value=cloud.get_enabled(),
+                    elem_classes="switch",
+                )
+                hf_btn = gr.Button(
+                    "Activar también Qwen (token gratuito de Hugging Face)" if not cloud.get_token()
+                    else "Qwen activado · cambiar token de Hugging Face",
+                    size="sm", variant="secondary",
+                )
                 use_gemini = gr.Checkbox(
                     label="Restaurar con Gemini  (IA de Google: el cuadro se envía a Google y repinta lo perdido)",
                     value=gemini.get_enabled() and bool(gemini.get_key()),
@@ -600,6 +651,12 @@ with gr.Blocks(title="ONFR REVO") as demo:
                 with gr.Row():
                     gemini_cancel_btn = gr.Button("Cancelar", size="sm")
                     gemini_ok = gr.Button("Aceptar", variant="primary", size="sm")
+            with gr.Column(visible=False, elem_id="hf-modal") as hf_modal:
+                gr.Markdown("### Token de Hugging Face\nGratis en huggingface.co → Settings → Access Tokens (tipo «Read»).")
+                hf_key = gr.Textbox(show_label=False, type="password", placeholder="Pega tu token (hf_…)")
+                with gr.Row():
+                    hf_cancel_btn = gr.Button("Cancelar", size="sm")
+                    hf_ok = gr.Button("Aceptar", variant="primary", size="sm")
             gr.Markdown(
                 "**Protección facial  ● ON** — siempre activa. REVO no inventa rasgos: si no puede "
                 "mejorar una cara con seguridad, la deja como estaba.",
@@ -646,6 +703,11 @@ with gr.Blocks(title="ONFR REVO") as demo:
     )
     color_on.change(lambda on: gr.update(visible=bool(on)), color_on, color_amount)
     mode.change(lambda m: gr.update(visible=m == "restaurar_cuadro"), mode, gemini_box)
+    use_ia.input(cloud.set_enabled, use_ia, None)
+    hf_btn.click(lambda: (gr.update(visible=True), gr.update(value="")), None, [hf_modal, hf_key])
+    hf_ok.click(hf_accept, hf_key, [hf_modal, hf_key, hf_btn])
+    hf_key.submit(hf_accept, hf_key, [hf_modal, hf_key, hf_btn])
+    hf_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(value="")), None, [hf_modal, hf_key])
     use_gemini.input(gemini_toggle, use_gemini, [gemini_modal, gemini_key])
     gemini_ok.click(gemini_accept, gemini_key, [use_gemini, gemini_modal, gemini_key])
     gemini_key.submit(gemini_accept, gemini_key, [use_gemini, gemini_modal, gemini_key])
@@ -653,7 +715,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
     start = go.click(anim_html, original, [anim, slider], show_progress="hidden")
     work = start.then(
         run,
-        [editor, original, mode, intensity, scale, color_on, color_amount, use_gemini],
+        [editor, original, mode, intensity, scale, color_on, color_amount, use_gemini, use_ia],
         [result, slider, anim, save, summary_btn, done_md, summary, imap],
         show_progress="hidden",
     )

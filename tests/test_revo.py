@@ -232,6 +232,49 @@ def test_gemini_restoration_flow_without_network():
         assert "clave" in str(e)
 
 
+def test_cloud_chain_flux_then_qwen_without_network():
+    """FLUX falla → Qwen responde; el resultado vuelve al tamaño original."""
+    from revo import cloud
+    from revo.pipeline import process_cloud
+
+    img = np.full((300, 200, 3), 128, np.uint8)
+    seen = []
+
+    def fake_call(space, src):
+        seen.append(space)
+        if "FLUX" in space:
+            raise RuntimeError("You have exceeded your GPU quota")
+        return np.full((512, 341, 3), 90, np.uint8)
+
+    try:
+        process_cloud(img, Settings(mode="restaurar_cuadro"), "FLUX", call=fake_call)
+        raise AssertionError("FLUX debía fallar")
+    except cloud.CloudError as e:
+        assert "agotado" in str(e)
+    res = process_cloud(img, Settings(mode="restaurar_cuadro"), "Qwen", call=fake_call)
+    assert res.image.shape == img.shape and res.stats["cloud"] == "Qwen"
+    assert seen[0].startswith("black-forest-labs") and seen[1].startswith("Qwen/")
+
+
+def test_cloud_fills_space_parameters_by_name():
+    from revo import cloud
+
+    class FakeClient:
+        def view_api(self, **_):
+            return {"named_endpoints": {"/infer": {"parameters": [
+                {"parameter_name": "image", "component": "Image"},
+                {"parameter_name": "prompt", "component": "Textbox"},
+                {"parameter_name": "seed", "component": "Slider"},
+                {"parameter_name": "rewrite_prompt", "component": "Checkbox"},
+                {"parameter_name": "num_inference_steps", "component": "Slider"},
+            ]}}}
+
+    name, kw = cloud._arguments(FakeClient(), __file__)
+    assert name == "/infer" and kw["prompt"] == cloud.PROMPT
+    assert kw["seed"] == 0 and kw["rewrite_prompt"] is False and "num_inference_steps" not in kw
+    assert cloud._find_image(([{"image": {"path": __file__}}], 0)) == __file__
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):
