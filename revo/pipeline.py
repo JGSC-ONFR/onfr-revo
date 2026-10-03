@@ -474,6 +474,10 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
                 # sobre la cara solo se cierra desde el borde (sin IA)
                 rf = cv2.dilate(on_face.astype(np.uint8), np.ones((3, 3), np.uint8)) * 255
                 work = cv2.inpaint(work, rf, 3, cv2.INPAINT_TELEA)
+        # y lo último: motas sueltas y moteado sobre los blancos (nada a la vista)
+        guard_zone = cv2.dilate(((face_u > 0.05) | eyes).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+        work, swept = painting.sweep_specks(work, guard_zone)
+        residual |= swept
         holes = ((holes > 0) | residual).astype(np.uint8)
 
     # lo perdido del todo (la cara de un gato sin ojos ni nariz) se vuelve a

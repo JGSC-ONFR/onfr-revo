@@ -694,3 +694,73 @@ def tame_fill(filled: np.ndarray, before: np.ndarray, holes: np.ndarray) -> np.n
         lab[..., c] = np.where(hb, clamped, lab[..., c])
         lab[..., c] += (mu[c] - lab[..., c]) * t
     return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+
+
+SPECK_L = 14.0  # cuánto más clara que lo de alrededor es una mota de preparación
+SPECK_MAX = 600  # píxeles (a 1000 px de lado): más grande ya no es una mota
+WHITE_SPECK_L = 12.0  # sobre un blanco pintado, puntos aún más blancos que él
+
+
+def _odd(v: float) -> int:
+    return max(3, int(round(v))) | 1
+
+
+def sweep_specks(rgb: np.ndarray, protect: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Último barrido para que no quede ni un desconchón a la vista:
+
+    - motas claras y apagadas sueltas sobre la pintura (los puntitos blancos
+      del vestido rojo), que se cierran desde su borde;
+    - el moteado blanco sobre un objeto blanco o crema (el cuerpo y la cabeza
+      del gato blanco), que se iguala al tono del propio objeto.
+
+    `protect` (caras y ojos) no se toca nunca. Devuelve (imagen, zona tocada)."""
+    h, w = rgb.shape[:2]
+    f = max(h, w) / 1000.0
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    L = lab[..., 0].astype(np.float32)
+    a = lab[..., 1].astype(np.float32) - 128
+    C = np.hypot(a, lab[..., 2].astype(np.float32) - 128)
+    keep_out = protect > 0 if protect is not None else np.zeros((h, w), bool)
+
+    # 1. motas sueltas
+    k = _odd(21 * f)
+    mL = cv2.medianBlur(lab[..., 0], k).astype(np.float32)
+    mC = cv2.medianBlur(np.clip(C * 4, 0, 255).astype(np.uint8), k).astype(np.float32) / 4
+    # sobre colores vivos (rojo) la trama apenas brilla: basta menos contraste
+    m = (L - mL > np.where(mC > 25, SPECK_L - 4, SPECK_L)) & (C < mC - 3) & (L > 140) & ~keep_out
+    n, li, st, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
+    area = st[:, cv2.CC_STAT_AREA]
+    keep = (area >= max(3, int(3 * f * f))) & (area <= SPECK_MAX * f * f)
+    keep[0] = False
+    sp = keep[li]
+    # el borde de un objeto claro (la oreja del gato contra el vestido) no es
+    # una mota; junto a un fondo oscuro, sí (desconchón pegado al gato)
+    big = ((L > 165) & (C < 30) & ~sp).astype(np.uint8)
+    nb, lb, sb, _ = cv2.connectedComponentsWithStats(big, connectivity=8)
+    kb = sb[:, cv2.CC_STAT_AREA] >= 400 * f * f
+    kb[0] = False
+    near = cv2.dilate(kb[lb].astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    sp &= ~np.isin(li, np.unique(li[sp & near & (mL >= 100)]))
+    out = rgb
+    if sp.any():
+        out = cv2.inpaint(rgb, cv2.dilate(sp.astype(np.uint8) * 255, np.ones((3, 3), np.uint8)), 3, cv2.INPAINT_TELEA)
+
+    # 2. moteado sobre los blancos pintados (no verdosos: una pared verde clara no)
+    light = ((L > 165) & (C < 30) & (a > -2)).astype(np.uint8)
+    light = cv2.morphologyEx(light, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    nb, lb, sb, _ = cv2.connectedComponentsWithStats(light, connectivity=8)
+    kb = sb[:, cv2.CC_STAT_AREA] >= 2000 * f * f
+    kb[0] = False
+    inside = (cv2.erode(kb[lb].astype(np.uint8), np.ones((5, 5), np.uint8)) > 0) & ~keep_out
+    flat = np.zeros((h, w), bool)
+    if inside.any():
+        med = cv2.medianBlur(out, _odd(15 * f))
+        mLw = cv2.cvtColor(med, cv2.COLOR_RGB2LAB)[..., 0].astype(np.float32)
+        Lo = cv2.cvtColor(out, cv2.COLOR_RGB2LAB)[..., 0].astype(np.float32)
+        flat = cv2.dilate((inside & (Lo - mLw > WHITE_SPECK_L)).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        flat &= ~keep_out
+        if flat.any():
+            al = cv2.GaussianBlur(flat.astype(np.float32), (0, 0), 1)[..., None]
+            al[keep_out] = 0
+            out = np.clip(out * (1 - al) + med * al, 0, 255).astype(np.uint8)
+    return out, sp | flat

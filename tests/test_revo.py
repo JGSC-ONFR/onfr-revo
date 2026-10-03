@@ -340,6 +340,29 @@ def test_lama_packs_small_crops_four_per_pass():
         assert rec[75, 45, 1] > 180 and abs(int(rec[10, 10, 1]) - 120) < 10
 
 
+def test_sweep_leaves_no_specks_but_spares_protected_and_edges():
+    from revo import painting
+    rng = np.random.default_rng(1)
+    img = np.zeros((400, 400, 3), np.uint8)
+    img[:] = (170, 30, 45)  # vestido rojo
+    img += rng.integers(0, 6, img.shape, dtype=np.uint8)
+    cv2.circle(img, (300, 300), 70, (235, 225, 210), -1)  # gato blanco
+    dots = [(40, 40), (80, 120), (150, 60), (60, 200)]
+    for x, y in dots:
+        cv2.circle(img, (x, y), 2, (240, 235, 225), -1)
+    for x, y in [(290, 290), (310, 320)]:
+        cv2.circle(img, (x, y), 2, (255, 255, 255), -1)
+    protect = np.zeros((400, 400), bool)
+    protect[180:220, 40:80] = True  # una cara: su mota se queda
+    out, touched = painting.sweep_specks(img, protect)
+    for x, y in dots[:3]:
+        assert out[y, x, 1] < 90, (x, y, out[y, x])  # la mota se pintó de rojo
+    assert (out[200, 60] == img[200, 60]).all()  # la cara, intacta
+    assert out[290, 290].astype(int).sum() < 255 * 3 - 20  # moteado igualado
+    assert out[300, 368, 1] > 180  # el borde del gato sigue siendo blanco
+    assert not touched[protect].any()
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):
