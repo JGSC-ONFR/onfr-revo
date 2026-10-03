@@ -6,6 +6,10 @@
   (paquete face_recognition_models).
 - Color (opcional, ~130 MB): Zhang et al. 2016, «Colorful Image Colorization».
 - Relleno IA (opcional, ~200 MB): LaMa en formato ONNX.
+- IA de pintar (opcional, ~2 GB): Stable Diffusion Inpainting, para volver a
+  pintar lo perdido del todo en los cuadros. Solo con:
+
+    python setup_models.py --pintor
 
 Si un modelo opcional no se puede descargar, REVO funciona igual: sin
 colorización, o con el relleno clásico en lugar de LaMa.
@@ -88,8 +92,35 @@ def optional():
             print(f"  (opcional) {name} no disponible; REVO funcionará sin él")
 
 
+PINTOR_REPO = "stable-diffusion-v1-5/stable-diffusion-inpainting"
+PINTOR_PKGS = ["torch", "diffusers>=0.30", "transformers", "accelerate", "safetensors", "huggingface_hub"]
+
+
+def pintor():
+    """IA de pintar local (~2 GB): librerías y modelo (pesos en media precisión)."""
+    print("Instalando las librerías de la IA de pintar…")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", *PINTOR_PKGS])
+    from huggingface_hub import snapshot_download
+
+    dest = os.path.join(DEST, "pintor")
+    common = ["model_index.json", "scheduler/*", "tokenizer/*", "*/config.json"]
+    print("Descargando la IA de pintar (~2 GB, una sola vez)…")
+    try:
+        snapshot_download(PINTOR_REPO, local_dir=dest, allow_patterns=common + ["*/*.fp16.safetensors"])
+        if not glob.glob(os.path.join(dest, "unet", "*.fp16.safetensors")):
+            raise FileNotFoundError("sin pesos fp16")
+    except Exception as e:  # noqa: BLE001  algunos repos no tienen la variante fp16
+        print(f"  ({e}); se descarga la versión completa (~4 GB)")
+        snapshot_download(PINTOR_REPO, local_dir=dest, allow_patterns=common + ["unet/*.safetensors",
+                          "vae/*.safetensors", "text_encoder/*.safetensors"])
+    print("✓ IA de pintar")
+
+
 if __name__ == "__main__":
     os.makedirs(DEST, exist_ok=True)
+    if "--pintor" in sys.argv:
+        pintor()
+        sys.exit(0)
     faces()
     optional()
     print("Listo.")

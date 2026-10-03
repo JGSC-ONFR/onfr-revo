@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from . import colorize as colorizer
-from . import cloud, enhance, gemini, inpaint, painting, restore, symmetry
+from . import cloud, enhance, gemini, inpaint, painting, repaint, restore, symmetry
 from .analysis import Analysis, analyze, estimate_noise
 from .faces import Face, FaceGuard, face_masks
 from .fidelity import FaceCheck, check_face, identity_limit
@@ -475,6 +475,17 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
                 work = cv2.inpaint(work, rf, 3, cv2.INPAINT_TELEA)
         holes = ((holes > 0) | residual).astype(np.uint8)
 
+    # lo perdido del todo (la cara de un gato sin ojos ni nariz, un hueco
+    # enorme) se vuelve a pintar con la IA de pintar local, si está instalada.
+    # Nunca sobre una cara humana
+    repainted = 0
+    if settings.auto_damage and repaint.available():
+        lost = painting.lost_zones(rgb, holes, face_u, flaked=bool(flakes.any()))
+        if lost.any():
+            say(0.9, "Repintando lo perdido (puede tardar unos minutos)")
+            work, repainted = repaint.repaint(work, lost, lambda msg: say(0.9, msg))
+            holes = ((holes > 0) | (lost > 0)).astype(np.uint8)
+
     uncolored = None
     if settings.colorize:
         say(0.93, "Estimando colores")
@@ -491,6 +502,7 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
         "varnish": varnish["removed"],
         "filled_on_faces": fill_info.get("on_faces", 0),
         "mirrored": int(sym.sum()),
+        "repainted": repainted,
         "engine": "IA de relleno (LaMa)" if fill_info.get("engine") == "LaMa" else "la textura de alrededor",
     }
     return Result(
@@ -533,6 +545,11 @@ def _painting_lines(res: Result, changed: float) -> list[str]:
         lines.append(
             f"- Lagunas reintegradas con {st['engine']}: {st['loss_regions'] + st['user_regions']} "
             "(lo que había debajo no se puede recuperar; se continúa lo de alrededor)"
+        )
+    if st.get("repainted"):
+        lines.append(
+            f"- Zonas perdidas del todo vueltas a pintar con la IA de pintar (en tu ordenador): {st['repainted']}. "
+            "Ahí no quedaba pintura que recuperar: lo nuevo está pintado de nuevo, no restaurado"
         )
     if st.get("mirrored"):
         lines.append(

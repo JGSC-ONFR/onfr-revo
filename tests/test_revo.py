@@ -275,6 +275,38 @@ def test_cloud_fills_space_parameters_by_name():
     assert cloud._find_image(([{"image": {"path": __file__}}], 0)) == __file__
 
 
+def test_repaint_only_inside_lost_zones_and_blends():
+    """La IA de pintar solo cambia la zona perdida (y su borde fundido)."""
+    from revo import repaint
+
+    img = np.full((200, 300, 3), 100, np.uint8)
+    zones = np.zeros((200, 300), np.uint8)
+    zones[80:120, 100:160] = 255
+    calls = []
+
+    def fake_paint(crop, hole, seed):
+        calls.append(crop.shape)
+        return np.full_like(crop, 200)
+
+    out, n = repaint.repaint(img, zones, paint=fake_paint)
+    assert n == 1 and len(calls) == 1
+    assert (out[90:110, 110:150] == 200).all()
+    assert (out[:40] == 100).all() and (out[:, :40] == 100).all()
+
+
+def test_lost_zones_never_on_faces():
+    from revo import painting
+
+    rgb = np.full((300, 300, 3), 120, np.uint8)
+    holes = np.zeros((300, 300), np.uint8)
+    holes[50:150, 50:150] = 255
+    face = np.zeros((300, 300), np.float32)
+    face[60:140, 60:140] = 1
+    assert painting.lost_zones(rgb, holes).any()
+    z = painting.lost_zones(rgb, holes, face)
+    assert not (z[60:140, 60:140] > 0).any()
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

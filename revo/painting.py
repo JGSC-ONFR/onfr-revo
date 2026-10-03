@@ -69,6 +69,9 @@ NET = 0
 STRAIGHT = 0.5
 SOLID = 0.55  # zona clara maciza = objeto pintado, no racimo de desconchones
 TAME_K = 1.0  # cuántas desviaciones por encima de la luz de alrededor puede quedar un relleno
+LOST_HOLE = 0.004  # hueco que ocupa más de esta parte del cuadro: se repinta
+LOST_THICK = 0.025  # grosor mínimo de un hueco para repintarlo
+LOST_WHITE = 0.12  # objeto blanco con tanta preparación a la vista: se repinta
 HARMONY_KEEP = 0.6  # parte del borde que debe ser de un solo tono para igualar un hueco grande
 DARK_BG = 110.0  # fondo oscuro: ahí una mota clara junto a un objeto blanco es desconchón
 DULL_C = 8.0  # cuánto color pierde la piel donde asoma la preparación
@@ -571,6 +574,43 @@ def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
         dense &= feature_mask < 0.5
     m |= dense.astype(np.uint8)
     return cv2.dilate(m, np.ones((3, 3), np.uint8)) * 255
+
+
+def lost_zones(rgb: np.ndarray, holes: np.ndarray, face_mask: np.ndarray | None = None, flaked: bool = True) -> np.ndarray:
+    """Lo que se ha perdido del todo y hay que volver a pintar (no basta con
+    rellenar): los huecos muy grandes y los objetos blancos (un gato blanco)
+    cubiertos de desconchones, donde la preparación asoma por todas partes y
+    ya no quedan rasgos. Nunca sobre una cara humana."""
+    h, w = holes.shape
+    zones = np.zeros((h, w), bool)
+    # hueco grande de verdad: lo que sobrevive a una apertura ancha (no una
+    # cadena de desconchones pequeños que se tocan)
+    ko = max(9, int(LOST_THICK * max(h, w))) | 1
+    hb = cv2.morphologyEx((holes > 0).astype(np.uint8), cv2.MORPH_OPEN,
+                          cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ko, ko)))
+    hb = cv2.dilate(hb, np.ones((5, 5), np.uint8)) & (holes > 0).astype(np.uint8)
+    n, li, st, _ = cv2.connectedComponentsWithStats(hb, connectivity=8)
+    for j in range(1, n):
+        if st[j, cv2.CC_STAT_AREA] >= LOST_HOLE * h * w:
+            zones |= li == j
+    lab = _lab(rgb)
+    Lf = lab[..., 0].astype(np.float32)
+    a = lab[..., 1].astype(np.float32) - 128
+    C = np.hypot(a, lab[..., 2].astype(np.float32) - 128)
+    k = max(15, int(0.03 * max(h, w))) | 1
+    bg = cv2.medianBlur(lab[..., 0], min(k, 255)).astype(np.float32)
+    ground = (Lf - bg > 12) & (C < 32) & (Lf > 170)
+    whites = _painted_whites(Lf, C, a, max(h, w))
+    n, li, st, _ = cv2.connectedComponentsWithStats(whites.astype(np.uint8), connectivity=8)
+    for j in range(1, n if flaked else 1):
+        comp = li == j
+        if ground[comp].mean() >= LOST_WHITE:
+            zones |= comp
+    if face_mask is not None:
+        guard = cv2.dilate((face_mask > 0.05).astype(np.uint8), np.ones((15, 15), np.uint8)) > 0
+        zones &= ~guard
+    zones = cv2.morphologyEx(zones.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    return zones * 255
 
 
 def harmonize_fill(filled: np.ndarray, before: np.ndarray, holes: np.ndarray, min_area: int = 300) -> np.ndarray:
