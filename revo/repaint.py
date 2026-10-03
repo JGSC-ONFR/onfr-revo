@@ -170,7 +170,12 @@ def describe(crop: np.ndarray, hole: np.ndarray | None = None) -> str:
         if animal:
             tone = _tone(crop, hole if hole is not None else np.ones(crop.shape[:2], bool))
             return f"close-up of the face of a {tone} {animal.rstrip('s')}, eyes, nose, fur"
-        subject = " ".join(w for w in words[:8] if w not in HUMAN)
+        # sin animal: nunca una cara ni una persona. Si es piel (un brazo,
+        # un hombro), se pide piel; si no, lo mismo que hay alrededor
+        if any(w in words for w in ("arm", "arms", "shoulder", "hand", "hands", "skin", "elbow")) or HUMAN & set(words):
+            return "smooth bare skin of an arm, soft shading, no face"
+        bad = HUMAN | {"face", "head", "'", "s", "is", "of", "a", "an", "the", "with", "in", "on", "and"}
+        subject = " ".join(w for w in words[:10] if w not in bad)
         return subject or GENERIC
     except Exception:  # noqa: BLE001  sin lector se pinta igual, con menos guía
         return GENERIC
