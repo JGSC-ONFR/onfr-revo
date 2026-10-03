@@ -491,7 +491,7 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
         lost = painting.tap_zones(rgb, taps, face_u)
         if lost.any():
             say(0.9, "Repintando lo perdido (unos minutos por zona)")
-            work, repainted = repaint.repaint(work, lost, lambda msg: say(0.9, msg))
+            work, repainted = repaint.repaint(work, lost, lambda msg: say(0.9, msg), ref=clean)
             holes = ((holes > 0) | (lost > 0)).astype(np.uint8)
 
     uncolored = None

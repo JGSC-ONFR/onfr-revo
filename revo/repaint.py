@@ -181,7 +181,7 @@ def describe(crop: np.ndarray, hole: np.ndarray | None = None) -> str:
         return GENERIC
 
 
-def _paint(crop: np.ndarray, hole: np.ndarray, seed: int) -> np.ndarray:
+def _paint(crop: np.ndarray, hole: np.ndarray, seed: int, ref: np.ndarray | None = None) -> np.ndarray:
     import torch
     from PIL import Image
 
@@ -190,9 +190,12 @@ def _paint(crop: np.ndarray, hole: np.ndarray, seed: int) -> np.ndarray:
     sw, sh = max(64, int(round(w * f / 8)) * 8), max(64, int(round(h * f / 8)) * 8)
     ys, xs = np.nonzero(hole)
     tight = (slice(ys.min(), ys.max() + 1), slice(xs.min(), xs.max() + 1)) if ys.size else (slice(None), slice(None))
-    caption = describe(crop[tight], hole[tight])
+    # lo que queda del original (los restos de los ojos, la silueta) guía al
+    # lector y al pintor mejor que la versión ya limpiada, que lo iguala todo
+    src = ref if ref is not None else crop
+    caption = describe(src[tight], hole[tight])
     fast = _fast()
-    img = Image.fromarray(cv2.resize(crop, (sw, sh), interpolation=cv2.INTER_AREA))
+    img = Image.fromarray(cv2.resize(src, (sw, sh), interpolation=cv2.INTER_AREA))
     msk = Image.fromarray(cv2.resize(hole.astype(np.uint8) * 255, (sw, sh), interpolation=cv2.INTER_NEAREST))
     with _lock:
         out = _load()(
@@ -208,9 +211,10 @@ def _paint(crop: np.ndarray, hole: np.ndarray, seed: int) -> np.ndarray:
     return np.clip(gen, 0, 255).astype(np.uint8)
 
 
-def repaint(rgb: np.ndarray, zones: np.ndarray, say=None, paint=None) -> tuple[np.ndarray, int]:
+def repaint(rgb: np.ndarray, zones: np.ndarray, say=None, paint=None, ref: np.ndarray | None = None) -> tuple[np.ndarray, int]:
     """Repinta cada zona (>0) en su recorte con margen y la funde con lo de
     alrededor. Devuelve (imagen, zonas repintadas)."""
+    extra = paint is None and ref is not None  # el original, solo para el pintor de verdad
     paint = paint or _paint
     out = rgb.copy()
     n, lab, st, _ = cv2.connectedComponentsWithStats((zones > 0).astype(np.uint8), connectivity=8)
@@ -223,7 +227,8 @@ def repaint(rgb: np.ndarray, zones: np.ndarray, say=None, paint=None) -> tuple[n
         hole = lab[Y0:Y1, X0:X1] == j
         if say:
             say(f"Repintando lo perdido ({j} de {n - 1})")
-        rec = paint(np.ascontiguousarray(out[Y0:Y1, X0:X1]), hole, seed=j)
+        kw = {"ref": np.ascontiguousarray(ref[Y0:Y1, X0:X1])} if extra else {}
+        rec = paint(np.ascontiguousarray(out[Y0:Y1, X0:X1]), hole, seed=j, **kw)
         # fundido suave: dentro de la zona, lo nuevo; en el borde, mezcla
         a = cv2.GaussianBlur(hole.astype(np.float32), (0, 0), 4)
         a = np.maximum(a, cv2.erode(hole.astype(np.uint8), np.ones((9, 9), np.uint8)))[..., None]
