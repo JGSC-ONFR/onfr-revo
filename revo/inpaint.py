@@ -26,8 +26,10 @@ from .faces import MODELS_DIR
 SMALL = 60  # píxeles: por debajo, una mota
 LAMA = "lama_fp32.onnx"
 LAMA_MIN = 1500  # píxeles: por debajo, el relleno clásico basta
-BUDGET = 25_000  # píxeles del recorte reducido que procesa FSR (tiempo acotado)
+BUDGET = 10_000  # píxeles del recorte reducido que procesa FSR (tiempo acotado)
 LAMA_TILE = 384  # lado máximo de un grupo de daños rellenado en una sola pasada de LaMa
+LAMA_SIDE = 512  # lo que procesa LaMa de una vez
+PACK = 320  # recortes de hasta este lado van de cuatro en cuatro en una pasada
 _lama = None
 _lama_lock = threading.Lock()
 
@@ -102,6 +104,50 @@ def _fsr(crop: np.ndarray, hole: np.ndarray) -> np.ndarray:
     return cv2.resize(dst, (w, h), interpolation=cv2.INTER_CUBIC) if f < 1 else dst
 
 
+def _lama_many(img: np.ndarray, jobs: list) -> list:
+    """LaMa sobre varios recortes. Cada pasada cuesta lo mismo sea cual sea el
+    recorte (trabaja a 512x512), así que los pequeños (hasta PACK px de lado)
+    van de cuatro en cuatro, cada uno en su cuarto de lienzo y con su propio
+    borde reflejado. Si LaMa falla, None (relleno clásico)."""
+    crops = [np.ascontiguousarray(img[y0:y1, x0:x1]) for (x0, y0, x1, y1), _, _ in jobs]
+    recs: list = [None] * len(jobs)
+    half = LAMA_SIDE // 2
+    small = [k for k, c in enumerate(crops) if max(c.shape[:2]) <= PACK]
+    if len(small) < 2:
+        small = []
+    try:
+        for k in range(len(jobs)):
+            if k not in small:
+                recs[k] = _lama_fill(crops[k], jobs[k][2])
+        for g in range(0, len(small), 4):
+            group = small[g:g + 4]
+            canvas = np.zeros((LAMA_SIDE, LAMA_SIDE, 3), np.uint8)
+            holes = np.zeros((LAMA_SIDE, LAMA_SIDE), np.uint8)
+            places = []
+            for q, k in enumerate(group):
+                c, hk = crops[k], jobs[k][2]
+                h, w = c.shape[:2]
+                f = half / max(h, w)
+                sw, sh = max(1, round(w * f)), max(1, round(h * f))
+                cs = cv2.resize(c, (sw, sh), interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_CUBIC)
+                hs = (cv2.resize(hk.astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST) > 0).astype(np.uint8)
+                # el resto del cuarto, con el propio recorte reflejado (nada
+                # de los vecinos se cuela en el relleno)
+                cs = cv2.copyMakeBorder(cs, 0, half - sh, 0, half - sw, cv2.BORDER_REFLECT)
+                hs = cv2.copyMakeBorder(hs, 0, half - sh, 0, half - sw, cv2.BORDER_REFLECT)
+                Y, X = (q // 2) * half, (q % 2) * half
+                canvas[Y:Y + half, X:X + half] = cs
+                holes[Y:Y + half, X:X + half] = hs
+                places.append((k, X, Y, sw, sh))
+            res = _lama_fill(canvas, holes)
+            for k, X, Y, sw, sh in places:
+                h, w = crops[k].shape[:2]
+                recs[k] = cv2.resize(res[Y:Y + sh, X:X + sw], (w, h), interpolation=cv2.INTER_CUBIC)
+    except Exception:  # noqa: BLE001  si LaMa falla, relleno clásico
+        pass
+    return recs
+
+
 def _clusters(boxes: list[list[int]], limit: int) -> list[list[int]]:
     """Une recuadros cercanos mientras el resultado no pase de `limit` px de
     lado: varios daños juntos se rellenan en una sola pasada."""
@@ -172,6 +218,7 @@ def fill(rgb: np.ndarray, mask: np.ndarray, face_mask: np.ndarray | None = None)
         (big_rest, big_boxes, _lama_fill, LAMA_TILE),
         (mid_rest, mid_boxes, _fsr, 400),
     ):
+        jobs = []
         for x0, y0, x1, y1 in _clusters([b[:4] for b in boxes], limit):
             # cada daño se escribe solo desde el recorte que lo contiene entero
             # (con su margen): si dos recortes se pisan, el segundo no corta
@@ -184,9 +231,10 @@ def fill(rgb: np.ndarray, mask: np.ndarray, face_mask: np.ndarray | None = None)
             # todo el daño del recorte cuenta como hueco (también las motas):
             # si no, el relleno copia la textura del desconchado de al lado
             hole = ((m[y0:y1, x0:x1] > 0) | face_hole[y0:y1, x0:x1]).astype(np.uint8)
-            try:
-                rec = fn(out[y0:y1, x0:x1], hole)
-            except Exception:  # noqa: BLE001  si LaMa falla, relleno clásico
+            jobs.append(((x0, y0, x1, y1), sel, hole))
+        recs = _lama_many(out, jobs) if fn is _lama_fill else [None] * len(jobs)
+        for ((x0, y0, x1, y1), sel, hole), rec in zip(jobs, recs):
+            if rec is None:
                 rec = _fsr(out[y0:y1, x0:x1], hole)
             out[y0:y1, x0:x1][sel] = rec[sel]
             info["passes"] += 1

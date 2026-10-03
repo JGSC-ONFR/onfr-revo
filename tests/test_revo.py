@@ -310,6 +310,36 @@ def test_tap_zone_follows_the_touched_object_and_spares_faces():
     assert not (painting.tap_zones(rgb, taps, face) > 0).any()
 
 
+def test_lama_packs_small_crops_four_per_pass():
+    from revo import inpaint
+    calls = []
+
+    def fake(crop, hole):
+        calls.append(crop.shape[:2])
+        out = crop.copy()
+        out[hole > 0] = (0, 200, 0)
+        return out
+
+    img = np.full((600, 600, 3), 120, np.uint8)
+    jobs = []
+    for k in range(5):
+        x0, y0 = 20 + 100 * k, 30
+        hole = np.zeros((150, 90), np.uint8)
+        hole[60:90, 30:60] = 1
+        jobs.append(((x0, y0, x0 + 90, y0 + 150), hole > 0, hole))
+    jobs.append(((0, 200, 500, 600), None, np.ones((400, 500), np.uint8)))
+    old = inpaint._lama_fill
+    inpaint._lama_fill = fake
+    try:
+        recs = inpaint._lama_many(img, jobs)
+    finally:
+        inpaint._lama_fill = old
+    assert len(calls) == 3, calls  # el grande solo, y 5 pequeños en 2 pasadas
+    for (_, _, hole), rec in zip(jobs[:5], recs[:5]):
+        assert rec.shape[:2] == hole.shape
+        assert rec[75, 45, 1] > 180 and abs(int(rec[10, 10, 1]) - 120) < 10
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):
