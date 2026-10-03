@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import os
 import random
 import re
@@ -52,6 +53,7 @@ MODE_HELP = {
     "suciedad y barniz amarillento y los repara. Si algo se ha perdido del todo (la cara de un gato), dale un "
     "toque con el pincel en su centro y la IA de pintar lo volverá a pintar.",
 }
+EDIT_SIDE = 1280  # px de la copia que se ve en el editor (pintar encima no necesita más)
 PREVIEW_SIDE = 1600  # px de la vista previa ANTES/DESPUÉS
 # Pegar (Ctrl+V) en cualquier parte, y arrastrar imágenes también desde otra
 # web como Google Drive: se mandan al buzón oculto «revo-inbox».
@@ -61,7 +63,27 @@ PASTE_JS = """
   // la imagen entra por el mismo camino que si la eligieras con «Subir».
   // Antes se vacía el editor: si la foto nueva cae encima de la anterior,
   // el editor repite la subida y se traga la siguiente.
-  const inject = (file) => {
+  // las fotos enormes (móvil, 4000 px) se reducen aquí, antes de entrar en el
+  // editor: REVO trabaja a 2000 px igualmente, y el editor con una foto
+  // enorme se atasca al cambiar de modo o de foto
+  const shrink = async (file, MAX) => {
+    try {
+      const bmp = await createImageBitmap(file);
+      const f = MAX / Math.max(bmp.width, bmp.height);
+      if (f >= 1) { bmp.close(); return file; }
+      const c = document.createElement('canvas');
+      c.width = Math.round(bmp.width * f); c.height = Math.round(bmp.height * f);
+      const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bmp, 0, 0, c.width, c.height); bmp.close();
+      const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+      return blob ? new File([blob], 'imagen.png', {type: 'image/png'}) : file;
+    } catch (err) { return file; }
+  };
+  const inject = async (raw) => {
+    // el editor recibe una copia de 1280 px (pintar encima va fluido) y REVO
+    // la foto a 2000 px, con la que trabaja
+    const file = await shrink(raw, 1280);
+    const photoFile = await shrink(raw, 2000);
     const clear = document.querySelector('#editor button[aria-label="Clear canvas"]');
     const go = () => {
       const input = document.querySelector('#editor input[type=file]');
@@ -73,12 +95,22 @@ PASTE_JS = """
     };
     if (clear && window.revoHasImage) { clear.click(); setTimeout(go, 250); } else go();
     window.revoHasImage = true;
+    // y la misma foto, directa a REVO para analizarla
+    const rd = new FileReader();
+    rd.onload = () => {
+      const box = document.querySelector('#revo-photo textarea, #revo-photo input');
+      if (!box) return;
+      box.value = rd.result;
+      box.dispatchEvent(new Event('input', {bubbles: true}));
+      setTimeout(() => document.querySelector('#revo-photo-btn')?.click(), 50);
+    };
+    rd.readAsDataURL(photoFile);
   };
   // también las fotos que eliges con «Subir» o sueltas sobre el editor
   document.addEventListener('change', (e) => {
     if (e.revo || !e.target.matches || !e.target.matches('#editor input[type=file]')) return;
     const file = e.target.files && e.target.files[0];
-    if (!file || !window.revoHasImage) { window.revoHasImage = !!file; return; }
+    if (!file) return;
     e.stopImmediatePropagation(); e.preventDefault();
     inject(file);
   }, true);
@@ -198,7 +230,7 @@ button.mode-btn:nth-child(4) {background:linear-gradient(135deg,#10b981,#84cc16)
   box-shadow:0 4px 14px rgba(219,39,119,.35) !important}
 
 footer {display:none !important}
-#revo-inbox, #revo-fetch, #revo-outbox {display:none !important}
+#revo-inbox, #revo-fetch, #revo-outbox, #revo-photo, #revo-photo-btn {display:none !important}
 
 #go-btn {min-height:64px; font-size:1.3rem; letter-spacing:.14rem; font-weight:900; border:none !important;
   color:#fff !important; border-radius:18px !important;
@@ -286,8 +318,12 @@ def _source(ed, original):
     """La foto que se repara: siempre el original guardado al subirla, nunca
     la copia (comprimida) que el editor reenvía."""
     bg = _background(ed)
-    if original is not None and bg is not None and bg.shape == original.shape and _same(bg, original):
-        return original
+    if original is not None and bg is not None:
+        # el editor muestra una copia más pequeña (EDIT_SIDE): se compara a su tamaño
+        h, w = bg.shape[:2]
+        H, W = original.shape[:2]
+        if abs(h / w - H / W) < 0.02 and _same(bg, cv2.resize(original, (w, h), interpolation=cv2.INTER_AREA)):
+            return original
     return bg  # el editor tiene otra foto que no llegó a analizarse
 
 
@@ -296,10 +332,24 @@ def _shrink(img, side, interp=cv2.INTER_AREA):
     return cv2.resize(img, None, fx=f, fy=f, interpolation=interp) if f < 1 else img
 
 
+def _timed(fn):
+    """Apunta en el registro (revo_log.txt) cuánto tarda cada paso de la web:
+    así se ve qué atasca la página."""
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        t = time.time()
+        try:
+            return fn(*a, **k)
+        finally:
+            print(f"[revo] {fn.__name__}: {time.time() - t:.2f} s", flush=True)
+    return wrapper
+
+
 def _retrying(preprocess):
     """A veces el navegador reenvía la imagen del editor mientras aún se
     está escribiendo en disco; se reintenta en lugar de fallar."""
-    def wrapper(payload):
+    @_timed
+    def editor_in(payload):
         for k in range(20):
             try:
                 return preprocess(payload)
@@ -307,7 +357,7 @@ def _retrying(preprocess):
                 if k == 19:
                     raise
                 time.sleep(0.25)
-    return wrapper
+    return editor_in
 
 
 def _painted(ed, shape):
@@ -343,12 +393,13 @@ def _suggestions(img, mode, intensity, monochrome):
     return layer
 
 
-def clear_marks(original):
-    """En «Restaurar cuadro» no se usa el pincel: se quitan las marcas rosas
-    que hubiera de otro modo."""
-    if original is None:
-        return gr.update()
-    return {"background": original, "layers": [], "composite": None}
+@_timed
+def clear_marks(original, marked):
+    """En «Restaurar cuadro» se quitan las marcas rosas sugeridas por otro
+    modo. Solo si las hay: volver a cargar la foto en el editor cuesta."""
+    if original is None or not marked:
+        return gr.update(), False
+    return {"background": _shrink(original, EDIT_SIDE), "layers": [], "composite": None}, False
 
 
 DRIVE_ID = re.compile(r"(?:/file/d/|/d/|[?&]id=)([A-Za-z0-9_-]{20,})")
@@ -393,32 +444,47 @@ def _same(a, b) -> bool:
     return float(d.mean()) < 3.0 and float(np.percentile(d, 99)) < 40
 
 
-def on_upload(ed, original, mode, user_picked, intensity):
-    img = _background(ed)
+def _decode(data: str):
+    """La foto que manda la página (data URL), en RGB."""
+    try:
+        raw = base64.b64decode(data.split(",", 1)[1])
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    except Exception:  # noqa: BLE001
+        return None
+    return None if img is None else cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+@_timed
+def on_photo(data, original, mode, user_picked, intensity):
+    """La foto llega directamente desde la página (ya reducida a 2000 px), no
+    exportada desde el editor: exportar el lienzo del editor tarda muchísimo
+    y era lo que atascaba la web al poner o cambiar de foto."""
+    img = _decode(data or "")
     if img is None:
-        return gr.update(), None, gr.update(visible=False), mode, *mode_updates(mode)[1:]
-    if original is not None and img.shape == original.shape and _same(img, original):
-        # al cambiar de foto, el editor repite «upload» cada vez que recibe las
-        # marcas rosas (con la foto recomprimida): es la misma, no se analiza otra vez
-        return (gr.update(),) * (3 + len(mode_updates(mode)))
-    big = max(img.shape[:2]) > MAX_WORK
-    if big:  # fotos de móvil enormes: se trabaja a MAX_WORK px (mucho más rápido)
+        if data:
+            gr.Warning("No he podido abrir esa imagen.")
+        return gr.update(), original, gr.update(), mode, *mode_updates(mode)[1:], False
+    if max(img.shape[:2]) > MAX_WORK:  # por si llega sin reducir
         f = MAX_WORK / max(img.shape[:2])
         img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
     if user_picked and mode == "restaurar_cuadro":
         # cuadros: al subir no se analiza nada; todo se hace al pulsar Restaurar
-        return gr.update(), img, gr.update(visible=False), mode, *mode_updates(mode)[1:]
+        return gr.update(), img, gr.update(visible=False), mode, *mode_updates(mode)[1:], False
     a = analyze(img)
     if not user_picked:
         mode = a.suggested_mode()
     if mode == "restaurar_cuadro":
-        return gr.update(), img, gr.update(visible=False), mode, *mode_updates(mode)[1:]
+        return gr.update(), img, gr.update(visible=False), mode, *mode_updates(mode)[1:], False
 
     # daños grandes sugeridos: se pintan en la capa del pincel para que puedas
     # revisarlos (borrar o añadir) antes de reparar
     layer = _suggestions(img, mode, intensity, a.monochrome)
-    new_value = {"background": img, "layers": [layer], "composite": None}
-    return new_value, img, gr.update(visible=a.monochrome), mode, *mode_updates(mode)[1:]
+    if not layer[..., 3].any():  # nada que sugerir: el editor no se toca
+        return gr.update(), img, gr.update(visible=a.monochrome), mode, *mode_updates(mode)[1:], False
+    small = _shrink(img, EDIT_SIDE)
+    layer = cv2.resize(layer, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_NEAREST)
+    new_value = {"background": small, "layers": [layer], "composite": None}
+    return new_value, img, gr.update(visible=a.monochrome), mode, *mode_updates(mode)[1:], True
 
 
 def anim_html(original):
@@ -606,6 +672,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
     user_picked = gr.State(False)
     result = gr.State(None)
     original = gr.State(None)
+    marked = gr.State(False)  # hay marcas rosas sugeridas en el editor
 
     with gr.Row():
         buttons = [
@@ -619,7 +686,7 @@ with gr.Blocks(title="ONFR REVO") as demo:
             editor = gr.ImageEditor(
                 label="Sube tu imagen · pinta encima de agujeros y rasguños",
                 type="numpy",
-                sources=["upload", "clipboard"],
+                sources=["upload"],  # pegar: Ctrl+V en cualquier parte
                 brush=gr.Brush(colors=[BRUSH], default_color=BRUSH, color_mode="fixed", default_size=18),
                 eraser=gr.Eraser(default_size=24),
                 transforms=(),
@@ -632,6 +699,9 @@ with gr.Blocks(title="ONFR REVO") as demo:
             inbox = gr.Textbox(elem_id="revo-inbox", show_label=False, container=False)
             fetch = gr.Button(elem_id="revo-fetch")
             inbox_out = gr.Textbox(elem_id="revo-outbox", show_label=False, container=False)
+            # la foto, tal cual llega a la página (sin pasar por el editor)
+            photo = gr.Textbox(elem_id="revo-photo", show_label=False, container=False)
+            photo_btn = gr.Button(elem_id="revo-photo-btn")
             intensity = gr.Radio(list(LEVELS), value="Medio", label="Intervención", elem_classes="levels")
             with gr.Group(visible=False) as color_box:
                 color_on = gr.Checkbox(
@@ -707,15 +777,19 @@ with gr.Blocks(title="ONFR REVO") as demo:
     for (m, _), b in zip(MODE_BUTTONS, buttons):
         ev = b.click(lambda m=m: mode_updates(m), None, mode_outputs).then(lambda: True, None, user_picked)
         if m == "restaurar_cuadro":
-            ev.then(clear_marks, original, editor)
+            ev.then(clear_marks, [original, marked], [editor, marked])
 
     # el botón espera a que termine el análisis (y las marcas rosas)
     def analyzed(ev):
-        ev.then(on_upload, [editor, original, mode, user_picked, intensity], [editor, original, color_box, *mode_outputs]).then(
+        ev.then(on_photo, [photo, original, mode, user_picked, intensity], [editor, original, color_box, *mode_outputs, marked]).then(
+            # la foto ya está en REVO: se vacía el buzón (un texto de megas en
+            # la página la hace ir a tirones)
+            lambda: "", None, photo
+        ).then(
             lambda m: gr.update(interactive=True, value=ACTION[m]), mode, go
         )
 
-    analyzed(editor.upload(lambda: gr.update(interactive=False, value="Analizando la imagen…"), None, go))
+    analyzed(photo_btn.click(lambda: gr.update(interactive=False, value="Analizando la imagen…"), None, go))
     # un enlace arrastrado o pegado: se descarga y la página lo sube al editor
     fetch.click(lambda: gr.update(interactive=False, value="Descargando la imagen…"), None, go).then(
         receive, inbox, inbox_out
