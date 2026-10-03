@@ -107,6 +107,7 @@ def _load():
     return _pipe
 
 
+ANIMAL_PROMPT = "close-up of the face of a"
 HUMAN = {"woman", "man", "girl", "boy", "lady", "person", "people", "child", "baby", "women", "men", "her", "his"}
 ANIMALS = ("cat", "kitten", "dog", "puppy", "horse", "bird", "rabbit", "lamb", "sheep", "cow", "fox", "deer", "lion")
 COLORS = (("white", lambda L, C, h: L > 175 and C < 22), ("black", lambda L, C, h: L < 60),
@@ -169,7 +170,7 @@ def describe(crop: np.ndarray, hole: np.ndarray | None = None) -> str:
         animal = next((w for w in words if w.rstrip("s") in ANIMALS), None)
         if animal:
             tone = _tone(crop, hole if hole is not None else np.ones(crop.shape[:2], bool))
-            return f"close-up of the face of a {tone} {animal.rstrip('s')}, eyes, nose, fur"
+            return f"{ANIMAL_PROMPT} {tone} {animal.rstrip('s')}, eyes, nose, fur"
         # sin animal: nunca una cara ni una persona. Si es piel (un brazo,
         # un hombro), se pide piel; si no, lo mismo que hay alrededor
         if any(w in words for w in ("arm", "arms", "shoulder", "hand", "hands", "skin", "elbow")) or HUMAN & set(words):
@@ -194,6 +195,14 @@ def _paint(crop: np.ndarray, hole: np.ndarray, seed: int, ref: np.ndarray | None
     # lector y al pintor mejor que la versión ya limpiada, que lo iguala todo
     src = ref if ref is not None else crop
     caption = describe(src[tight], hole[tight])
+    if not caption.startswith(ANIMAL_PROMPT):
+        # solo se inventa una cabeza de animal perdida. Pelo, piel, ropa o
+        # fondo se cierran con el relleno normal (con lo que hay alrededor):
+        # la IA de pintar, sin un animal que pintar, se inventa cosas (un
+        # edificio en el pelo de una mujer)
+        from . import inpaint
+
+        return inpaint.fill(crop, hole.astype(np.uint8) * 255, None)[0]
     fast = _fast()
     img = Image.fromarray(cv2.resize(src, (sw, sh), interpolation=cv2.INTER_AREA))
     msk = Image.fromarray(cv2.resize(hole.astype(np.uint8) * 255, (sw, sh), interpolation=cv2.INTER_NEAREST))

@@ -699,6 +699,23 @@ def tame_fill(filled: np.ndarray, before: np.ndarray, holes: np.ndarray) -> np.n
 SPECK_L = 14.0  # cuánto más clara que lo de alrededor es una mota de preparación
 SPECK_MAX = 600  # píxeles (a 1000 px de lado): más grande ya no es una mota
 WHITE_SPECK_L = 12.0  # sobre un blanco pintado, puntos aún más blancos que él
+DRAWN_GAP = 90.0  # cuánto más oscuro que la preparación ha de ser algo para ser dibujo
+
+
+def drawn_detail(rgb: np.ndarray, holes: np.ndarray) -> np.ndarray:
+    """Dibujo que hay dentro de una máscara de daños y que no es daño: zonas
+    bastante más oscuras que la preparación que asoma en ese mismo cuadro (los
+    ojos de un gato, una sombra, el contorno de un lazo). Devuelve un uint8
+    0/1 para restarlo de la máscara."""
+    L = _lab(rgb)[..., 0].astype(np.float32)
+    exposed = holes & (L > 150)
+    if exposed.sum() < 50:
+        return np.zeros(L.shape, np.uint8)
+    prep = float(np.median(L[exposed]))  # luz de la preparación en este cuadro
+    dark = (L < prep - DRAWN_GAP) & holes
+    # grupos con cuerpo (un ojo), no el borde de 1 px de cada desconchón
+    dark = cv2.morphologyEx(dark.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return cv2.dilate(dark, np.ones((3, 3), np.uint8)) & holes.astype(np.uint8)
 
 
 def _odd(v: float) -> int:

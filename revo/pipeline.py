@@ -370,8 +370,16 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
 
     say(0.45, "Reintegrando lagunas")
     flakes = painting.detect_flakes(rgb, i, feat_u) if settings.auto_damage else empty
-    losses = np.maximum(painting.detect_losses(rgb, i, feat_u)[0], flakes) if settings.auto_damage else empty
+    lagoons = painting.detect_losses(rgb, i, feat_u)[0] if settings.auto_damage else empty
+    losses = np.maximum(lagoons, flakes)
     holes = ((losses > 0) | (user > 0)).astype(np.uint8)
+    if settings.auto_damage and flakes.any():
+        # la preparación que asoma es clara: lo oscuro que la máscara de
+        # desconchados ha alcanzado al ensancharse (los ojos de un gato, el
+        # contorno de un lazo) es pintura buena y no se rellena. Las roturas
+        # y lagunas se rellenan enteras
+        keep = painting.drawn_detail(clean, flakes > 0).astype(bool) & (lagoons == 0) & (user == 0)
+        holes[keep] = 0
     # referencia y último recurso para las caras: limpia y con los huecos
     # (ya sin ojos, nariz ni boca) cerrados a lo liso
     if holes.any():
