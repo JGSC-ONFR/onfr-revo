@@ -38,6 +38,7 @@ class Settings:
     color_amount: float = 0.8  # intensidad del color estimado
     grain: float | None = None  # None = automático según el modo
     user_mask: np.ndarray | None = None  # daños marcados con el pincel (>0)
+    repaint_taps: np.ndarray | None = None  # cuadros: toques sobre lo perdido del todo, para repintarlo (>0)
     auto_damage: bool = True  # detectar roturas y marcas grandes (la interfaz las propone en el pincel)
 
     @property
@@ -475,14 +476,17 @@ def _process_painting(rgb: np.ndarray, settings: Settings, say, t0: float) -> Re
                 work = cv2.inpaint(work, rf, 3, cv2.INPAINT_TELEA)
         holes = ((holes > 0) | residual).astype(np.uint8)
 
-    # lo perdido del todo (la cara de un gato sin ojos ni nariz, un hueco
-    # enorme) se vuelve a pintar con la IA de pintar local, si está instalada.
+    # lo perdido del todo (la cara de un gato sin ojos ni nariz) se vuelve a
+    # pintar con la IA de pintar local, solo donde se ha tocado con el pincel.
     # Nunca sobre una cara humana
     repainted = 0
-    if settings.auto_damage and repaint.available():
-        lost = painting.lost_zones(rgb, holes, face_u, flaked=bool(flakes.any()))
+    taps = settings.repaint_taps
+    if taps is not None and taps.any() and repaint.available():
+        if taps.shape[:2] != (h, w):
+            taps = cv2.resize(taps.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+        lost = painting.tap_zones(rgb, taps, face_u)
         if lost.any():
-            say(0.9, "Repintando lo perdido (puede tardar unos minutos)")
+            say(0.9, "Repintando lo perdido (unos minutos por zona)")
             work, repainted = repaint.repaint(work, lost, lambda msg: say(0.9, msg))
             holes = ((holes > 0) | (lost > 0)).astype(np.uint8)
 
@@ -593,7 +597,7 @@ def intervention_map(res: Result) -> tuple[np.ndarray, float]:
                      ("mirrored", (255, 210, 0))):
         mk = res._masks.get(key)
         if mk is not None and mk.any():
-            dm = cv2.resize(mk, size, interpolation=cv2.INTER_NEAREST) > 0
+            dm = cv2.resize(mk.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
             img[cv2.dilate(dm.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0] = col
     t = max(1, img.shape[1] // 400)
     for f, r in zip(res._faces, res.faces):

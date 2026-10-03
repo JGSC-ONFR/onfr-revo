@@ -6,7 +6,7 @@
   (paquete face_recognition_models).
 - Color (opcional, ~130 MB): Zhang et al. 2016, «Colorful Image Colorization».
 - Relleno IA (opcional, ~200 MB): LaMa en formato ONNX.
-- IA de pintar (opcional, ~2 GB): Stable Diffusion Inpainting, para volver a
+- IA de pintar (opcional, ~3 GB): Stable Diffusion Inpainting, para volver a
   pintar lo perdido del todo en los cuadros. Solo con:
 
     python setup_models.py --pintor
@@ -92,27 +92,35 @@ def optional():
             print(f"  (opcional) {name} no disponible; REVO funcionará sin él")
 
 
-PINTOR_REPO = "stable-diffusion-v1-5/stable-diffusion-inpainting"
-PINTOR_PKGS = ["torch", "diffusers>=0.30", "transformers", "accelerate", "safetensors", "huggingface_hub"]
+PINTOR_PKGS = ["torch", "diffusers>=0.30", "transformers", "accelerate", "safetensors", "huggingface_hub", "peft"]
 
 
 def pintor():
-    """IA de pintar local (~2 GB): librerías y modelo (pesos en media precisión)."""
+    """IA de pintar local (~3 GB): pintor (Stable Diffusion Inpainting, en
+    media precisión), acelerador (LCM) y lector de imágenes (BLIP)."""
     print("Instalando las librerías de la IA de pintar…")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", *PINTOR_PKGS])
     from huggingface_hub import snapshot_download
 
-    dest = os.path.join(DEST, "pintor")
+    sys.path.insert(0, HERE)
+    from revo.repaint import LCM_DIR, READER_DIR, REPOS
+
+    dest = os.path.join(DEST, "sd_inpaint")
     common = ["model_index.json", "scheduler/*", "tokenizer/*", "*/config.json"]
-    print("Descargando la IA de pintar (~2 GB, una sola vez)…")
+    print("Descargando el pintor (~2 GB, una sola vez)…")
     try:
-        snapshot_download(PINTOR_REPO, local_dir=dest, allow_patterns=common + ["*/*.fp16.safetensors"])
+        snapshot_download(REPOS["sd_inpaint"], local_dir=dest, allow_patterns=common + ["*/*.fp16.safetensors"])
         if not glob.glob(os.path.join(dest, "unet", "*.fp16.safetensors")):
             raise FileNotFoundError("sin pesos fp16")
     except Exception as e:  # noqa: BLE001  algunos repos no tienen la variante fp16
         print(f"  ({e}); se descarga la versión completa (~4 GB)")
-        snapshot_download(PINTOR_REPO, local_dir=dest, allow_patterns=common + ["unet/*.safetensors",
-                          "vae/*.safetensors", "text_encoder/*.safetensors"])
+        snapshot_download(REPOS["sd_inpaint"], local_dir=dest, allow_patterns=common + [
+            "unet/*.safetensors", "vae/*.safetensors", "text_encoder/*.safetensors"])
+    print("Descargando el acelerador (~70 MB)…")
+    snapshot_download(REPOS[LCM_DIR], local_dir=os.path.join(DEST, LCM_DIR), allow_patterns=["*.safetensors", "*.json"])
+    print("Descargando el lector de imágenes (~1 GB)…")
+    snapshot_download(REPOS[READER_DIR], local_dir=os.path.join(DEST, READER_DIR),
+                      allow_patterns=["*.json", "*.txt", "*.safetensors"])
     print("✓ IA de pintar")
 
 

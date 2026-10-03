@@ -275,7 +275,7 @@ def test_cloud_fills_space_parameters_by_name():
     assert cloud._find_image(([{"image": {"path": __file__}}], 0)) == __file__
 
 
-def test_repaint_only_inside_lost_zones_and_blends():
+def test_repaint_only_inside_the_zone_and_blends():
     """La IA de pintar solo cambia la zona perdida (y su borde fundido)."""
     from revo import repaint
 
@@ -294,17 +294,20 @@ def test_repaint_only_inside_lost_zones_and_blends():
     assert (out[:40] == 100).all() and (out[:, :40] == 100).all()
 
 
-def test_lost_zones_never_on_faces():
+def test_tap_zone_follows_the_touched_object_and_spares_faces():
+    """Un toque dentro de una mancha clara la coge entera, no el fondo; y
+    nunca una cara."""
     from revo import painting
 
-    rgb = np.full((300, 300, 3), 120, np.uint8)
-    holes = np.zeros((300, 300), np.uint8)
-    holes[50:150, 50:150] = 255
+    rgb = np.full((300, 300, 3), 40, np.uint8)
+    cv2.circle(rgb, (150, 150), 18, (230, 225, 215), -1)
+    taps = np.zeros((300, 300), np.uint8)
+    cv2.circle(taps, (150, 150), 4, 255, -1)
+    z = painting.tap_zones(rgb, taps) > 0
+    assert z[150, 135] and z[150, 165] and not z[150, 172] and not z[20, 20]
     face = np.zeros((300, 300), np.float32)
-    face[60:140, 60:140] = 1
-    assert painting.lost_zones(rgb, holes).any()
-    z = painting.lost_zones(rgb, holes, face)
-    assert not (z[60:140, 60:140] > 0).any()
+    face[100:200, 100:200] = 1
+    assert not (painting.tap_zones(rgb, taps, face) > 0).any()
 
 
 if __name__ == "__main__":

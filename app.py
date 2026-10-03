@@ -18,7 +18,7 @@ import numpy as np
 
 from revo import Settings, process
 from revo import colorize as colorizer
-from revo import restore
+from revo import repaint, restore
 from revo.analysis import analyze
 from revo.faces import FaceGuard, face_masks
 from revo.inpaint import lama_available, preload
@@ -48,7 +48,8 @@ MODE_HELP = {
     "restaurar": "Fotos antiguas o deterioradas: polvo, manchas, arañazos, roturas, ruido y contraste. Mantiene la época y la resolución.",
     "mejorar_restaurar": "Proceso completo: restauración → recuperación de calidad → aumento de resolución.",
     "restaurar_cuadro": "Pinturas: sube el cuadro y pulsa Restaurar; REVO encuentra solo los desconchones, grietas, "
-    "suciedad y barniz amarillento y los repara. No hace falta pintar nada.",
+    "suciedad y barniz amarillento y los repara. Si algo se ha perdido del todo (la cara de un gato), dale un "
+    "toque con el pincel en su centro y la IA de pintar lo volverá a pintar.",
 }
 PREVIEW_SIDE = 1600  # px de la vista previa ANTES/DESPUÉS
 # Pegar (Ctrl+V) en cualquier parte, y arrastrar imágenes también desde otra
@@ -515,15 +516,26 @@ def run(ed, original, mode, intensity, scale, color_on, color_amount, use_gemini
         colorize=bool(color_on),
         color_amount=COLOR_LEVELS[color_amount],
         user_mask=None if mode == "restaurar_cuadro" else _painted(ed, img.shape),
+        # cuadros: los toques del pincel marcan lo perdido del todo que se repinta
+        repaint_taps=_painted(ed, img.shape) if mode == "restaurar_cuadro" else None,
         # cuadros: REVO encuentra solo todo el daño; en fotos, los daños
         # grandes ya están en la capa del pincel
         auto_damage=mode == "restaurar_cuadro",
     )
     note = ""
+    tapped = s.repaint_taps is not None and s.repaint_taps.any()
+    if tapped and not repaint.available():
+        gr.Warning("Para volver a pintar lo perdido falta instalar la IA de pintar: python setup_models.py --pintor",
+                   title="IA de pintar no instalada")
     try:
         res = None
-        if mode == "restaurar_cuadro":
+        # con toques, el cuadro lo restaura REVO y la IA de pintar de este
+        # ordenador repinta solo lo tocado (no se manda a la nube)
+        if mode == "restaurar_cuadro" and not tapped:
             res, note = _restore_ai(img, s, use_gemini, use_ia)
+        elif tapped and repaint.available():
+            gr.Info("REVO restaura el cuadro y la IA de pintar repinta lo que has tocado (unos minutos por zona).",
+                    title="Repintando lo perdido")
         if res is None:
             res = process(img, s)
     except Exception as e:  # noqa: BLE001  la animación no debe quedarse girando

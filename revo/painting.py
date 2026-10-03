@@ -69,9 +69,8 @@ NET = 0
 STRAIGHT = 0.5
 SOLID = 0.55  # zona clara maciza = objeto pintado, no racimo de desconchones
 TAME_K = 1.0  # cuántas desviaciones por encima de la luz de alrededor puede quedar un relleno
-LOST_HOLE = 0.004  # hueco que ocupa más de esta parte del cuadro: se repinta
-LOST_THICK = 0.025  # grosor mínimo de un hueco para repintarlo
-LOST_WHITE = 0.12  # objeto blanco con tanta preparación a la vista: se repinta
+TAP_RADIUS = 0.08  # hasta dónde llega como mucho la zona de un toque (parte del lado del cuadro)
+TAP_TOL = 14.0  # cuánto puede variar el tono (Lab, luz a la mitad) dentro de la zona tocada
 HARMONY_KEEP = 0.6  # parte del borde que debe ser de un solo tono para igualar un hueco grande
 DARK_BG = 110.0  # fondo oscuro: ahí una mota clara junto a un objeto blanco es desconchón
 DULL_C = 8.0  # cuánto color pierde la piel donde asoma la preparación
@@ -576,41 +575,43 @@ def detect_flakes(rgb: np.ndarray, intensity: float, feature_mask: np.ndarray | 
     return cv2.dilate(m, np.ones((3, 3), np.uint8)) * 255
 
 
-def lost_zones(rgb: np.ndarray, holes: np.ndarray, face_mask: np.ndarray | None = None, flaked: bool = True) -> np.ndarray:
-    """Lo que se ha perdido del todo y hay que volver a pintar (no basta con
-    rellenar): los huecos muy grandes y los objetos blancos (un gato blanco)
-    cubiertos de desconchones, donde la preparación asoma por todas partes y
-    ya no quedan rasgos. Nunca sobre una cara humana."""
-    h, w = holes.shape
-    zones = np.zeros((h, w), bool)
-    # hueco grande de verdad: lo que sobrevive a una apertura ancha (no una
-    # cadena de desconchones pequeños que se tocan)
-    ko = max(9, int(LOST_THICK * max(h, w))) | 1
-    hb = cv2.morphologyEx((holes > 0).astype(np.uint8), cv2.MORPH_OPEN,
-                          cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ko, ko)))
-    hb = cv2.dilate(hb, np.ones((5, 5), np.uint8)) & (holes > 0).astype(np.uint8)
-    n, li, st, _ = cv2.connectedComponentsWithStats(hb, connectivity=8)
+def tap_zones(rgb: np.ndarray, taps: np.ndarray, face_mask: np.ndarray | None = None) -> np.ndarray:
+    """La zona perdida que se ha tocado con el pincel (un toque basta): desde
+    cada toque se extiende por lo que tiene su mismo tono (la cabeza de un
+    gato blanco), hasta un radio razonable. Nunca sobre una cara humana."""
+    h, w = taps.shape[:2]
+    zones = np.zeros((h, w), np.uint8)
+    t = (taps > 0).astype(np.uint8)
+    if not t.any():
+        return zones
+    lab = cv2.cvtColor(cv2.GaussianBlur(rgb, (0, 0), 2), cv2.COLOR_RGB2LAB).astype(np.float32)
+    n, li, st, cen = cv2.connectedComponentsWithStats(t, connectivity=8)
+    R = int(TAP_RADIUS * max(h, w))
+    yy, xx = np.mgrid[0:h, 0:w]
     for j in range(1, n):
-        if st[j, cv2.CC_STAT_AREA] >= LOST_HOLE * h * w:
-            zones |= li == j
-    lab = _lab(rgb)
-    Lf = lab[..., 0].astype(np.float32)
-    a = lab[..., 1].astype(np.float32) - 128
-    C = np.hypot(a, lab[..., 2].astype(np.float32) - 128)
-    k = max(15, int(0.03 * max(h, w))) | 1
-    bg = cv2.medianBlur(lab[..., 0], min(k, 255)).astype(np.float32)
-    ground = (Lf - bg > 12) & (C < 32) & (Lf > 170)
-    whites = _painted_whites(Lf, C, a, max(h, w))
-    n, li, st, _ = cv2.connectedComponentsWithStats(whites.astype(np.uint8), connectivity=8)
-    for j in range(1, n if flaked else 1):
-        comp = li == j
-        if ground[comp].mean() >= LOST_WHITE:
-            zones |= comp
+        cx, cy = int(cen[j][0]), int(cen[j][1])
+        # el tono de la zona: el mediano alrededor del toque (no el píxel
+        # exacto, que puede caer en un resto oscuro de un ojo)
+        rs = max(5, int(0.015 * max(h, w)))
+        near = lab[max(0, cy - rs):cy + rs + 1, max(0, cx - rs):cx + rs + 1].reshape(-1, 3)
+        seed = np.median(near, axis=0)
+        d = np.sqrt(((lab[..., 0] - seed[0]) * 0.5) ** 2 + (lab[..., 1] - seed[1]) ** 2 + (lab[..., 2] - seed[2]) ** 2)
+        x, y, bw, bh = st[j, :4]
+        r = max(R, bw // 2, bh // 2)
+        disk = (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+        same = (((d < TAP_TOL) & disk) | (li == j)).astype(np.uint8)
+        _, cc = cv2.connectedComponents(same, connectivity=4)
+        region = (cc == cc[cy, cx]) & (cc[cy, cx] > 0)
+        # sin agujeros (los restos oscuros de los ojos van dentro de la zona)
+        k = max(5, int(0.012 * max(h, w))) | 1
+        region = cv2.morphologyEx(region.astype(np.uint8), cv2.MORPH_CLOSE,
+                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        cnts, _ = cv2.findContours(region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(zones, cnts, -1, 255, -1)
     if face_mask is not None:
         guard = cv2.dilate((face_mask > 0.05).astype(np.uint8), np.ones((15, 15), np.uint8)) > 0
-        zones &= ~guard
-    zones = cv2.morphologyEx(zones.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-    return zones * 255
+        zones[guard] = 0
+    return zones
 
 
 def harmonize_fill(filled: np.ndarray, before: np.ndarray, holes: np.ndarray, min_area: int = 300) -> np.ndarray:
