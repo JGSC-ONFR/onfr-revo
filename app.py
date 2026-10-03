@@ -9,6 +9,7 @@ import os
 import random
 import re
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -247,6 +248,14 @@ def warm_up():
     FaceGuard.get()
     if colorizer.available():
         colorizer._load()
+    if repaint.available():
+        # la IA de pintar (≈12 s de carga) en segundo plano: no bloquea nada
+        threading.Thread(target=repaint.warm_up, daemon=True).start()
+
+
+def shutdown():
+    """Apaga REVO (botón «Apagar REVO»): REVO se abre sin ventana negra."""
+    threading.Timer(0.5, lambda: os._exit(0)).start()
 
 
 def mode_updates(mode):
@@ -736,6 +745,11 @@ with gr.Blocks(title="ONFR REVO") as demo:
     for dep in (start, work):
         dep.failure(failed, None, [anim, slider, done_md])
     summary_btn.click(show_summary, result, [summary, imap])
+
+    # REVO corre sin ventana: se apaga desde aquí
+    off = gr.Button("⏻ Apagar REVO", size="sm", variant="secondary", elem_id="off-btn")
+    off.click(shutdown, None, None, js="() => { setTimeout(() => { document.body.innerHTML ="
+              " '<h2 style=\"font-family:sans-serif;text-align:center;margin-top:20vh\">REVO apagado. Ya puedes cerrar esta pestaña.</h2>'; }, 300); }")
 
 
 if __name__ == "__main__":

@@ -7,3 +7,4 @@ models/*
 revo_config.json
 revo_clave.txt
 revo_token_hf.txt
+revo_log.txt

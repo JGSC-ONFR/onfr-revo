@@ -103,7 +103,7 @@ def pintor():
     from huggingface_hub import snapshot_download
 
     sys.path.insert(0, HERE)
-    from revo.repaint import LCM_DIR, READER_DIR, REPOS
+    from revo.repaint import LCM_DIR, READER_DIR, REPOS, TINY_VAE_DIR
 
     dest = os.path.join(DEST, "sd_inpaint")
     common = ["model_index.json", "scheduler/*", "tokenizer/*", "*/config.json"]
@@ -119,8 +119,12 @@ def pintor():
     print("Descargando el acelerador (~70 MB)…")
     snapshot_download(REPOS[LCM_DIR], local_dir=os.path.join(DEST, LCM_DIR), allow_patterns=["*.safetensors", "*.json"])
     print("Descargando el lector de imágenes (~1 GB)…")
+    # este repositorio solo publica los pesos como pytorch_model.bin
     snapshot_download(REPOS[READER_DIR], local_dir=os.path.join(DEST, READER_DIR),
-                      allow_patterns=["*.json", "*.txt", "*.safetensors"])
+                      allow_patterns=["*.json", "*.txt", "*.safetensors", "pytorch_model.bin"])
+    print("Descargando el acelerador de imagen (~10 MB)…")
+    snapshot_download(REPOS[TINY_VAE_DIR], local_dir=os.path.join(DEST, TINY_VAE_DIR),
+                      allow_patterns=["config.json", "diffusion_pytorch_model.safetensors"])
     print("✓ IA de pintar")
 
 

@@ -1,4 +1,10 @@
 @echo off
+rem Sin ventana negra: se abre a traves del lanzador (que muestra al instante
+rem una pagina de "Abriendo REVO..." y arranca REVO en segundo plano).
+if not "%REVO_HIDDEN%"=="1" if exist "%~dp0revo_lanzador.vbs" (
+    start "" wscript.exe "%~dp0revo_lanzador.vbs"
+    exit /b
+)
 rem Se ejecuta desde una copia temporal: asi este archivo se puede actualizar
 rem (git pull) mientras se usa sin que Windows se lie al leerlo.
 if not "%REVO_FROM_TEMP%"=="1" (
@@ -63,11 +69,12 @@ rem --- 3. Modelos faciales (solo la primera vez) -------------------------
 "%VPY%" setup_models.py
 if errorlevel 1 goto error
 
-rem --- 4. Acceso directo en el escritorio --------------------------------
-if not exist "%USERPROFILE%\Desktop\ONFR REVO.lnk" (
+rem --- 4. Acceso directo en el escritorio (al lanzador sin ventana) -------
+if not exist ".venv\acceso_v2.txt" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
       "$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\ONFR REVO.lnk');" ^
-      "$s.TargetPath='%REVO_BAT%'; $s.WorkingDirectory='%REVO_DIR%'; $s.IconLocation='%SystemRoot%\System32\imageres.dll,72'; $s.Save()" >nul 2>nul
+      "$s.TargetPath=$env:SystemRoot+'\System32\wscript.exe'; $s.Arguments='\"'+$env:REVO_DIR+'revo_lanzador.vbs\"'; $s.WorkingDirectory=$env:REVO_DIR; $s.IconLocation='%SystemRoot%\System32\imageres.dll,72'; $s.Save()" >nul 2>nul
+    echo ok> ".venv\acceso_v2.txt"
 )
 
 rem --- 5. Abrir ----------------------------------------------------------
@@ -75,11 +82,21 @@ echo.
 echo REVO se esta abriendo en el navegador. Deja esta ventana abierta mientras lo uses;
 echo cierrala para apagar REVO.
 echo.
+if "%REVO_HIDDEN%"=="1" (
+    rem sin ventana: la pagina de carga ya esta abierta y salta sola a REVO;
+    rem lo que escriba REVO queda en revo_log.txt por si algo falla
+    "%VPY%" app.py > revo_log.txt 2>&1
+    goto :eof
+)
 set "REVO_OPEN_BROWSER=1"
 "%VPY%" app.py
 goto :eof
 
 :error
+if "%REVO_HIDDEN%"=="1" (
+    mshta "javascript:alert('ONFR REVO no ha podido arrancar. Abre la carpeta de REVO y mira revo_log.txt, o pasaselo a Claude.');close()"
+    exit /b 1
+)
 echo.
 echo Algo ha fallado. Copia el texto de esta ventana y pegaselo a Claude.
 pause

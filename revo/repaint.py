@@ -9,7 +9,7 @@ cuentas ni límites) para volver a pintar la zona:
 1. un lector de imágenes (BLIP) mira la zona y dice qué hay («la cabeza de un
    gato blanco»): sin eso, la IA pinta una mancha;
 2. el pintor la repinta partiendo de lo que queda (silueta, restos de ojos),
-   acelerado con LCM (6 pasos en vez de 25);
+   acelerado con LCM (4 pasos en vez de 25);
 3. se le devuelve el grano del lienzo del original y se funde con lo de
    alrededor.
 
@@ -30,11 +30,13 @@ from .faces import MODELS_DIR
 # carpetas de los modelos (la primera que exista)
 PAINTER_DIRS = ("sd_inpaint", "pintor")
 LCM_DIR = "lcm_lora"
+TINY_VAE_DIR = "taesd"
 READER_DIR = "blip"
 REPOS = {
     "sd_inpaint": "stable-diffusion-v1-5/stable-diffusion-inpainting",
     LCM_DIR: "latent-consistency/lcm-lora-sdv1-5",
     READER_DIR: "Salesforce/blip-image-captioning-base",
+    TINY_VAE_DIR: "madebyollin/taesd",
 }
 PROMPT = "old oil painting on canvas, {caption}, muted colors, soft brushstrokes, painterly"
 GENERIC = "the same subject as around it"
@@ -42,7 +44,7 @@ NEGATIVE = "cracks, flaking, paint loss, damage, stains, blurry, text, watermark
 CAPTION_PREFIX = "the head of a"  # lo que se suele tocar: una cabeza perdida
 SIDE = 384        # lado de trabajo (más rápido en CPU; 512 sin acelerador)
 STRENGTH = 0.75   # cuánto se aleja de lo que hay (1 = de cero)
-STEPS_LCM, GUIDANCE_LCM = 6, 1.5
+STEPS_LCM, GUIDANCE_LCM = 4, 1.5
 STEPS, GUIDANCE = 25, 6.0
 GRAIN = 0.6       # cuánto grano del lienzo original se devuelve
 
@@ -93,29 +95,83 @@ def _load():
             pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
             pipe.load_lora_weights(_dir(LCM_DIR))
             pipe.fuse_lora()
+        if os.path.exists(os.path.join(_dir(TINY_VAE_DIR), "config.json")):
+            # codificador/decodificador pequeño: un 30 % más rápido en CPU, y
+            # el detalle fino lo pone después el grano del lienzo original
+            from diffusers import AutoencoderTiny
+
+            pipe.vae = AutoencoderTiny.from_pretrained(_dir(TINY_VAE_DIR), torch_dtype=torch.float32, local_files_only=True)
         pipe.set_progress_bar_config(disable=True)
         torch.set_num_threads(max(1, os.cpu_count() or 1))
         _pipe = pipe
     return _pipe
 
 
-def describe(crop: np.ndarray) -> str:
-    """Qué hay en la zona, en pocas palabras (inglés, para el pintor)."""
+HUMAN = {"woman", "man", "girl", "boy", "lady", "person", "people", "child", "baby", "women", "men", "her", "his"}
+ANIMALS = ("cat", "kitten", "dog", "puppy", "horse", "bird", "rabbit", "lamb", "sheep", "cow", "fox", "deer", "lion")
+COLORS = (("white", lambda L, C, h: L > 175 and C < 22), ("black", lambda L, C, h: L < 60),
+          ("grey", lambda L, C, h: C < 12), ("ginger", lambda L, C, h: 40 <= h <= 80 and C >= 22),
+          ("brown", lambda L, C, h: True))
+
+
+def _reader_models():
     global _reader
+    if _reader is None:
+        from transformers import BlipForConditionalGeneration, BlipProcessor
+
+        _reader = (BlipProcessor.from_pretrained(_dir(READER_DIR), local_files_only=True),
+                   BlipForConditionalGeneration.from_pretrained(_dir(READER_DIR), local_files_only=True).eval())
+    return _reader
+
+
+def _caption(crop: np.ndarray, prefix: str) -> str:
+    from PIL import Image
+
+    proc, model = _reader_models()
+    inputs = proc(Image.fromarray(np.ascontiguousarray(crop)), prefix or None, return_tensors="pt")
+    out = model.generate(**inputs, max_new_tokens=20)
+    text = proc.decode(out[0], skip_special_tokens=True).replace(" - ", "-").strip()
+    return text[len(prefix):].strip() if prefix and text.startswith(prefix.replace(" - ", "-")) else text
+
+
+def _tone(crop: np.ndarray, hole: np.ndarray) -> str:
+    lab = cv2.cvtColor(crop, cv2.COLOR_RGB2LAB).astype(np.float32)
+    px = lab[hole] if hole.any() else lab.reshape(-1, 3)
+    L, a, b = np.median(px, axis=0)
+    C = float(np.hypot(a - 128, b - 128))
+    hue = float(np.degrees(np.arctan2(b - 128, a - 128)) % 360)
+    return next(name for name, ok in COLORS if ok(L, C, hue))
+
+
+def warm_up() -> None:
+    """Carga el pintor y el lector antes de que se pidan (en un hilo aparte:
+    la carga no bloquea al resto de REVO)."""
+    try:
+        with _lock:
+            _load()
+        if os.path.isdir(_dir(READER_DIR)):
+            _reader_models()
+    except Exception:  # noqa: BLE001  se volverá a intentar al usarlo
+        pass
+
+
+def describe(crop: np.ndarray, hole: np.ndarray | None = None) -> str:
+    """Qué hay en la zona, en pocas palabras (inglés, para el pintor). Se lee
+    el recorte justo de la zona (con más contexto, el lector ve a la persona
+    de al lado y dice «una mujer»). Si es un animal, se pide su cabeza con su
+    color («the face of a white cat»); nunca se pide pintar una persona."""
     if not os.path.isdir(_dir(READER_DIR)):
         return GENERIC
     try:
-        from PIL import Image
-        from transformers import BlipForConditionalGeneration, BlipProcessor
-
-        if _reader is None:
-            _reader = (BlipProcessor.from_pretrained(_dir(READER_DIR), local_files_only=True),
-                       BlipForConditionalGeneration.from_pretrained(_dir(READER_DIR), local_files_only=True).eval())
-        proc, model = _reader
-        inputs = proc(Image.fromarray(crop), CAPTION_PREFIX, return_tensors="pt")
-        out = model.generate(**inputs, max_new_tokens=20)
-        text = proc.decode(out[0], skip_special_tokens=True).strip()
-        return text or GENERIC
+        words = []
+        for prefix in ("a close-up painting of a", "the head of a"):
+            words += _caption(crop, prefix).lower().replace(",", " ").split()
+        animal = next((w for w in words if w.rstrip("s") in ANIMALS), None)
+        if animal:
+            tone = _tone(crop, hole if hole is not None else np.ones(crop.shape[:2], bool))
+            return f"close-up of the face of a {tone} {animal.rstrip('s')}, eyes, nose, fur"
+        subject = " ".join(w for w in words[:8] if w not in HUMAN)
+        return subject or GENERIC
     except Exception:  # noqa: BLE001  sin lector se pinta igual, con menos guía
         return GENERIC
 
@@ -127,7 +183,9 @@ def _paint(crop: np.ndarray, hole: np.ndarray, seed: int) -> np.ndarray:
     h, w = crop.shape[:2]
     f = SIDE / max(h, w)
     sw, sh = max(64, int(round(w * f / 8)) * 8), max(64, int(round(h * f / 8)) * 8)
-    caption = describe(crop)
+    ys, xs = np.nonzero(hole)
+    tight = (slice(ys.min(), ys.max() + 1), slice(xs.min(), xs.max() + 1)) if ys.size else (slice(None), slice(None))
+    caption = describe(crop[tight], hole[tight])
     fast = _fast()
     img = Image.fromarray(cv2.resize(crop, (sw, sh), interpolation=cv2.INTER_AREA))
     msk = Image.fromarray(cv2.resize(hole.astype(np.uint8) * 255, (sw, sh), interpolation=cv2.INTER_NEAREST))
