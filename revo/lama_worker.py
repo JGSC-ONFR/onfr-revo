@@ -42,7 +42,11 @@ def main(model_path: str) -> None:
 
     stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
     sys.stdout = sys.stderr  # nada más que resultados por stdout
-    sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    so = ort.SessionOptions()
+    # sin espera activa: con el portátil en batería Windows aparca núcleos y
+    # los hilos que esperan girando lo frenan muchísimo (17 s → 9,6 s por pasada)
+    so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    sess = ort.InferenceSession(model_path, so, providers=["CPUExecutionProvider"])
     pickle.dump("ready", stdout)
     stdout.flush()
     while True:
